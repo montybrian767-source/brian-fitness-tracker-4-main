@@ -46,13 +46,5 @@ def body_intelligence_panel(latest_metrics, weekly_change, monthly_change, body_
                 )
     
     st.markdown("---")
-
-    # Keep this summary section native so no raw HTML tags are ever shown.
-    summary_bits = []
-    if latest_metrics:
-        latest_date = latest_metrics.get("date")
-        if latest_date:
-            summary_bits.append(f"Latest entry: {latest_date}")
-
-    if summary_bits:
-        st.caption(" | ".join(summary_bits))
+    
+    st.markdown(html_content, unsafe_allow_html=True)
