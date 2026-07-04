@@ -1,0 +1,2 @@
+timestamp,sleep_hours,sleep_quality,muscle_soreness,energy_level,stress_level,hydration_oz,previous_workout_intensity,calories,protein_g,body_weight_lbs,body_fat_pct,recovery_score,recovery_pct,recovery_status,readiness_color,recommendation
+2026-07-03 14:50:03,7.0,7.0,4.0,7.0,4.0,0.0,Normal,0.0,0.0,185.0,20.0,52,52,Light Session,Yellow,Recovery is moderate. Keep weights lighter and focus on clean form.

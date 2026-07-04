@@ -1,0 +1,47 @@
+day,muscle_group,exercise,target_sets,target_reps,base_weight,image_file
+Monday,Chest + Triceps + Abs,Chest Press Machine,4,10-12,105.0,chest_press_machine.png
+Monday,Chest + Triceps + Abs,Incline Dumbbell Press,4,10-12,40.0,incline_dumbbell_press.png
+Monday,Chest + Triceps + Abs,Pec Deck Fly,3,15,85.0,pec_deck_fly.png
+Monday,Chest + Triceps + Abs,Cable Chest Fly,3,15,35.0,cable_chest_fly.png
+Monday,Chest + Triceps + Abs,Tricep Pushdown,4,15,27.5,tricep_pushdown.png
+Monday,Chest + Triceps + Abs,Overhead Tricep Extension,3,15,10.0,overhead_tricep_extension.png
+Monday,Chest + Triceps + Abs,Crunch,4,20,0.0,crunch.png
+Tuesday,Back + Biceps + Forearms,Wide Grip Lat Pulldown,4,12,105.0,wide_grip_lat_pulldown.png
+Tuesday,Back + Biceps + Forearms,Close Grip Pulldown,3,12,90.0,wide_grip_lat_pulldown.png
+Tuesday,Back + Biceps + Forearms,Seated Row Machine,4,12,85.0,seated_row_machine.png
+Tuesday,Back + Biceps + Forearms,Straight Arm Pushdown,3,15,45.0,straight_arm_pushdown.png
+Tuesday,Back + Biceps + Forearms,Rear Delt Machine Fly,3,15,55.0,rear_delt_machine_fly.png
+Tuesday,Back + Biceps + Forearms,Bicep Curl,4,12,50.0,bicep_curl.png
+Tuesday,Back + Biceps + Forearms,Hammer Curl,3,15,27.5,hammer_curl.png
+Tuesday,Back + Biceps + Forearms,Wrist Curl,3,20,15.0,bicep_curl.png
+Tuesday,Back + Biceps + Forearms,Reverse Wrist Curl,3,20,7.5,hammer_curl.png
+Wednesday,Shoulders + Abs,Shoulder Press Machine,4,12,60.0,shoulder_press_machine.png
+Wednesday,Shoulders + Abs,Machine Lateral Raise,4,15,40.0,machine_lateral_raise.png
+Wednesday,Shoulders + Abs,Rear Delt Machine Fly,3,15,70.0,rear_delt_machine_fly.png
+Wednesday,Shoulders + Abs,Face Pull,4,15,27.5,straight_arm_pushdown.png
+Wednesday,Shoulders + Abs,Dumbbell Lateral Raise,3,15,2.5,dumbbell_lateral_raise.png
+Wednesday,Shoulders + Abs,Russian Twist,3,15 each side,0.0,russian_twist.png
+Wednesday,Shoulders + Abs,Crunch,4,20,0.0,crunch.png
+Wednesday,Shoulders + Abs,Plank,3,45 sec,0.0,plank.png
+Thursday,Leg Rehab Day,Leg Curl,4,15,85.0,leg_curl.png
+Thursday,Leg Rehab Day,Hip Abduction Machine,4,15,150.0,leg_extension.png
+Thursday,Leg Rehab Day,Hip Adduction Machine,4,15,150.0,leg_extension.png
+Thursday,Leg Rehab Day,Glute Bridge Machine,3,15,0.0,leg_press_machine.png
+Thursday,Leg Rehab Day,Terminal Knee Extensions,3,20,0.0,leg_extension.png
+Thursday,Leg Rehab Day,Standing Calf Raise,3,20,30.0,standing_calf_raise.png
+Thursday,Leg Rehab Day,Plank,3,30 sec,0.0,plank.png
+Friday,Chest + Triceps Heavy,Chest Press Machine,4,10,115.0,chest_press_machine.png
+Friday,Chest + Triceps Heavy,Incline Dumbbell Press,3,10,40.0,incline_dumbbell_press.png
+Friday,Chest + Triceps Heavy,Pec Deck Fly,3,15,85.0,pec_deck_fly.png
+Friday,Chest + Triceps Heavy,Cable Chest Fly,3,15,35.0,cable_chest_fly.png
+Friday,Chest + Triceps Heavy,Tricep Pushdown,4,15,27.5,tricep_pushdown.png
+Friday,Chest + Triceps Heavy,Overhead Tricep Extension,3,15,10.0,overhead_tricep_extension.png
+Friday,Chest + Triceps Heavy,Crunch,4,20,0.0,crunch.png
+Saturday,Back + Shoulders + Arms,Wide Grip Lat Pulldown,3,12,105.0,wide_grip_lat_pulldown.png
+Saturday,Back + Shoulders + Arms,Seated Row Machine,3,12,85.0,seated_row_machine.png
+Saturday,Back + Shoulders + Arms,Face Pull,3,15,27.5,straight_arm_pushdown.png
+Saturday,Back + Shoulders + Arms,Shoulder Press Machine,3,12,60.0,shoulder_press_machine.png
+Saturday,Back + Shoulders + Arms,Machine Lateral Raise,3,15,40.0,machine_lateral_raise.png
+Saturday,Back + Shoulders + Arms,Bicep Curl,4,12,50.0,bicep_curl.png
+Saturday,Back + Shoulders + Arms,Hammer Curl,3,15,27.5,hammer_curl.png
+Saturday,Back + Shoulders + Arms,Tricep Pushdown,3,15,27.5,tricep_pushdown.png
