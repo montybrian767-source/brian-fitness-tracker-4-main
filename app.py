@@ -794,7 +794,7 @@ elif page == "Workout Builder":
         shown = library[library['exercise'].astype(str).str.contains(search, case=False, na=False)]
     else:
         shown = library
-    st.markdown("### Current Plan / Exercise Library")
+    st.markdown("### Current Plan Table")
     st.dataframe(shown[['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file']], use_container_width=True)
 
     st.markdown("### Add Exercise to Plan")
@@ -1146,21 +1146,12 @@ elif page == "Progress Analytics":
             st.dataframe(totals, use_container_width=True)
 
 elif page == "Exercise Library":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Exercise Image Library</div><div class="sub">Checks assets/exercises and data/exercise_image_map.csv</div></div>', unsafe_allow_html=True)
-    files = sorted(list(ASSETS.glob('*.png')) + list(ASSETS.glob('*.jpg')) + list(ASSETS.glob('*.jpeg')))
-    st.write(f"Images folder: `{ASSETS}`")
-    st.write(f"Image files found: **{len(files)}**")
-    if MAP.exists():
-        m=pd.read_csv(MAP)
-        st.dataframe(m, use_container_width=True)
-    else:
-        st.warning('No exercise_image_map.csv found.')
-    if files:
-        cols=st.columns(4)
-        for idx,p in enumerate(files[:60]):
-            with cols[idx%4]:
-                st.image(str(p), use_container_width=True)
-                st.caption(p.name)
+    # Ensure Exercise Library route always uses latest page/component code on rerun.
+    import importlib
+    import pages.exercise_library as exercise_library_page
+
+    importlib.reload(exercise_library_page)
+    exercise_library_page.render_exercise_library_page(ASSETS)
 
 elif page == "History":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)

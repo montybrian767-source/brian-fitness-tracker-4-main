@@ -24,22 +24,23 @@ class RenphoSyncResult:
 
 
 def _load_local_env() -> None:
-    env_path = Path.cwd() / ".env"
-    if not env_path.exists():
-        return
-    try:
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key in {"RENPHO_EMAIL", "RENPHO_PASSWORD"} and key not in os.environ:
-                os.environ[key] = value
-    except Exception:
-        # Environment loading is best-effort only.
-        return
+    env_paths = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"]
+    for env_path in env_paths:
+        if not env_path.exists():
+            continue
+        try:
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key in {"RENPHO_EMAIL", "RENPHO_PASSWORD"} and key not in os.environ:
+                    os.environ[key] = value
+        except Exception:
+            # Environment loading is best-effort only.
+            continue
 
 
 def _friendly_auth_error(exc: Exception) -> str:
@@ -96,6 +97,7 @@ def _normalize_measurements(measurements: List[Dict[str, Any]]) -> pd.DataFrame:
             continue
 
         row = {c: "" for c in BODY_COLUMNS}
+        row["_measurement_ts"] = dt
         row["date"] = dt.strftime("%Y-%m-%d")
         row["body_weight_lbs"] = _to_lbs(_first(m, ["weight", "weight_kg", "weightKg", "body_weight"]))
         row["body_fat_pct"] = _num(_first(m, ["bodyfat", "body_fat", "bodyFat", "fat", "fat_percent"]))
@@ -131,7 +133,8 @@ def _normalize_measurements(measurements: List[Dict[str, Any]]) -> pd.DataFrame:
     ]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    return df[BODY_COLUMNS]
+    df = df.sort_values("_measurement_ts").reset_index(drop=True)
+    return df
 
 
 def _get_client_and_payload(email: str, password: str) -> Any:
@@ -244,13 +247,26 @@ def sync_renpho_measurements(existing_df: pd.DataFrame) -> RenphoSyncResult:
     pulled = len(measurements)
 
     normalized = _normalize_measurements(measurements)
-    invalid = max(0, pulled - len(normalized))
+    normalized_rows = len(normalized)
+    invalid = max(0, pulled - normalized_rows)
 
     existing_dates = set(existing_df.get("date", pd.Series(dtype=str)).astype(str).dropna()) if not existing_df.empty else set()
-    duplicate_mask = normalized["date"].astype(str).isin(existing_dates) if not normalized.empty else pd.Series(dtype=bool)
-    duplicates = int(duplicate_mask.sum()) if not normalized.empty else 0
+    if normalized.empty:
+        duplicate_mask = pd.Series(dtype=bool)
+        incoming_duplicate_count = 0
+        duplicates = 0
+        candidates = normalized
+    else:
+        duplicate_mask = normalized["date"].astype(str).isin(existing_dates)
+        incoming_duplicate_count = int(normalized.duplicated(subset=["date"], keep="last").sum())
+        duplicates = int(duplicate_mask.sum()) + incoming_duplicate_count
+        candidates = normalized.loc[~duplicate_mask].drop_duplicates(subset=["date"], keep="last").copy()
 
-    candidates = normalized.loc[~duplicate_mask].drop_duplicates(subset=["date"], keep="last") if not normalized.empty else normalized
+    if not candidates.empty and "_measurement_ts" in candidates.columns:
+        candidates = candidates.drop(columns=["_measurement_ts"])
+
+    if not normalized.empty and "_measurement_ts" in normalized.columns:
+        normalized = normalized.drop(columns=["_measurement_ts"])
     added = len(candidates)
 
     if added == 0:

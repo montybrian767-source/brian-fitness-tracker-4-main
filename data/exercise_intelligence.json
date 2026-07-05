@@ -1,0 +1,840 @@
+{
+  "asset_system": {
+    "version": "4.1",
+    "root": "assets/exercises/<asset_folder>/",
+    "slots": ["hero", "start", "finish", "side", "top"],
+    "fallback": "assets/exercises/image_coming_soon.png"
+  },
+  "templates": {
+    "horizontal_press": {
+      "primary_muscles": ["Pectoralis Major"],
+      "secondary_muscles": ["Anterior Deltoids", "Triceps Brachii"],
+      "stabilizers": ["Rotator Cuff", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Pectoralis Major (Chest)", "percentage": 80},
+        {"muscle": "Anterior Deltoids (Shoulders)", "percentage": 10},
+        {"muscle": "Triceps Brachii (Arms)", "percentage": 10}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Push",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set shoulders down and back before the first rep.",
+        "Drive through the mid-hand and keep wrists stacked over elbows.",
+        "Lower under control until the handle path stays level with the mid chest.",
+        "Press to a strong finish without losing upper-back tension."
+      ],
+      "tips": [
+        "Keep your ribcage quiet and let the chest do the work.",
+        "Use a 2-3 second lowering phase for cleaner chest loading.",
+        "Stop the set when the shoulders roll forward or the press path changes."
+      ],
+      "common_mistakes": [
+        "Flaring elbows too early and shifting tension into the shoulders.",
+        "Bouncing the bottom position instead of owning the eccentric.",
+        "Overextending the lower back to finish the rep."
+      ],
+      "variations": ["Incline Dumbbell Press", "Pec Deck Fly", "Push-Ups"],
+      "summary": "A premium upper-body press pattern focused on chest-driven force production with shoulder stability."
+    },
+    "incline_press": {
+      "primary_muscles": ["Upper Pectorals"],
+      "secondary_muscles": ["Anterior Deltoids", "Triceps Brachii"],
+      "stabilizers": ["Rotator Cuff", "Upper Back", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Clavicular Pectoralis (Upper Chest)", "percentage": 70},
+        {"muscle": "Anterior Deltoids", "percentage": 15},
+        {"muscle": "Triceps Brachii", "percentage": 15}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Push",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set the bench angle so the upper chest leads instead of the front delts.",
+        "Start with dumbbells stacked over elbows and shoulders packed into the bench.",
+        "Lower slightly outside the upper chest with a smooth controlled arc.",
+        "Press up and in while keeping the ribs quiet."
+      ],
+      "tips": [
+        "Squeeze the handles as you press to improve shoulder stability.",
+        "Think elbows 30-45 degrees from the torso rather than flared straight out.",
+        "Finish each rep with tension, not momentum."
+      ],
+      "common_mistakes": [
+        "Using too steep a bench and turning the move into a shoulder press.",
+        "Letting the dumbbells drift behind the elbows at the bottom.",
+        "Crashing the weights together at the top."
+      ],
+      "variations": ["Chest Press Machine", "Incline Machine Press", "Low Incline Barbell Press"],
+      "summary": "An upper-chest biased press that rewards clean scapular control and smooth dumbbell pathing."
+    },
+    "chest_fly": {
+      "primary_muscles": ["Pectoralis Major"],
+      "secondary_muscles": ["Anterior Deltoids"],
+      "stabilizers": ["Biceps Tendon", "Upper Back"],
+      "muscle_percentages": [
+        {"muscle": "Pectoralis Major (Chest)", "percentage": 85},
+        {"muscle": "Anterior Deltoids", "percentage": 10},
+        {"muscle": "Upper Back Stabilizers", "percentage": 5}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Push",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Set the chest high and keep a soft bend in the elbows.",
+        "Open until you feel chest stretch without shoulder glide.",
+        "Sweep the arms together in a hugging arc and squeeze the chest at peak contraction.",
+        "Keep the rep tempo smooth on both directions."
+      ],
+      "tips": [
+        "Think biceps toward biceps instead of hands toward hands.",
+        "Shorten the range if the front shoulder takes over.",
+        "Use lighter loading and chase constant chest tension."
+      ],
+      "common_mistakes": [
+        "Straightening the elbows and turning the move into a press-lever.",
+        "Reaching too deep and losing shoulder position.",
+        "Rushing the stretch phase."
+      ],
+      "variations": ["Cable Chest Fly", "Pec Deck Fly", "Dumbbell Floor Fly"],
+      "summary": "A chest isolation pattern built around controlled stretch, smooth adduction, and tension quality."
+    },
+    "tricep_pushdown": {
+      "primary_muscles": ["Triceps Brachii"],
+      "secondary_muscles": ["Anconeus"],
+      "stabilizers": ["Core", "Lats"],
+      "muscle_percentages": [
+        {"muscle": "Triceps Brachii", "percentage": 85},
+        {"muscle": "Anconeus", "percentage": 10},
+        {"muscle": "Core Stabilizers", "percentage": 5}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Push",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Set elbows just ahead of the torso and lock them into place.",
+        "Extend the arms by driving the handle down without shoulder swing.",
+        "Pause in full extension, then return with control to the top.",
+        "Keep the torso still and let the elbows dictate the motion."
+      ],
+      "tips": [
+        "Use a slightly forward lean only if it helps keep elbows pinned.",
+        "Finish with the pinky side of the hand if using a rope.",
+        "Choose a load that keeps the triceps hot through the entire range."
+      ],
+      "common_mistakes": [
+        "Letting elbows drift forward as fatigue builds.",
+        "Using body weight to force the last inches of the rep.",
+        "Rebounding the top instead of controlling the return."
+      ],
+      "variations": ["Straight Bar Pushdown", "Single-Arm Cable Pressdown", "Overhead Tricep Extension"],
+      "summary": "A crisp triceps isolation pattern designed for clean elbow extension and repeatable arm tension."
+    },
+    "overhead_tricep": {
+      "primary_muscles": ["Triceps Long Head"],
+      "secondary_muscles": ["Triceps Lateral Head"],
+      "stabilizers": ["Core", "Shoulder Stabilizers"],
+      "muscle_percentages": [
+        {"muscle": "Triceps Long Head", "percentage": 70},
+        {"muscle": "Triceps Lateral Head", "percentage": 20},
+        {"muscle": "Core / Shoulders", "percentage": 10}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Push",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Set elbows high with ribs stacked over the pelvis.",
+        "Lower the implement behind the head without flaring the ribs.",
+        "Extend through the elbows until the arms finish long overhead.",
+        "Keep the upper arms stable while the forearms move."
+      ],
+      "tips": [
+        "Use a split stance if it helps control the torso.",
+        "Think about stretching the long head at the bottom rather than forcing range.",
+        "Keep neck relaxed and shoulders away from the ears."
+      ],
+      "common_mistakes": [
+        "Turning the movement into a standing incline press.",
+        "Flaring the elbows wide and losing line of pull.",
+        "Hyperextending the low back to finish reps."
+      ],
+      "variations": ["Cable Overhead Extension", "EZ-Bar Skull Crusher", "Single-Dumbbell Extension"],
+      "summary": "A long-head triceps movement that pairs stretch loading with overhead shoulder control."
+    },
+    "crunch": {
+      "primary_muscles": ["Rectus Abdominis"],
+      "secondary_muscles": ["Obliques"],
+      "stabilizers": ["Hip Flexors"],
+      "muscle_percentages": [
+        {"muscle": "Rectus Abdominis", "percentage": 75},
+        {"muscle": "Obliques", "percentage": 15},
+        {"muscle": "Hip Flexors", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Core",
+      "strength_focus": "Control",
+      "instructions": [
+        "Brace lightly and flatten the lower ribs before the first rep.",
+        "Curl the sternum toward the pelvis without yanking the neck forward.",
+        "Pause in the shortened position and breathe out fully.",
+        "Lower back down one segment at a time."
+      ],
+      "tips": [
+        "Think ribcage down rather than elbows to knees.",
+        "Small range with full ab tension beats large sloppy motion.",
+        "Exhale hard to finish each rep."
+      ],
+      "common_mistakes": [
+        "Pulling on the neck instead of curling through the trunk.",
+        "Using momentum and bouncing through the bottom.",
+        "Letting hip flexors dominate the movement."
+      ],
+      "variations": ["Cable Crunch", "Decline Crunch", "Dead Bug"],
+      "summary": "A simple trunk-flexion movement that emphasizes controlled abdominal shortening."
+    },
+    "lat_pulldown": {
+      "primary_muscles": ["Latissimus Dorsi"],
+      "secondary_muscles": ["Biceps Brachii", "Teres Major"],
+      "stabilizers": ["Lower Trapezius", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Latissimus Dorsi (Back)", "percentage": 70},
+        {"muscle": "Biceps Brachii", "percentage": 15},
+        {"muscle": "Upper Back / Teres Major", "percentage": 15}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Pull",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set the torso tall with ribs down and shoulders packed.",
+        "Drive elbows toward the ribs while keeping wrists quiet.",
+        "Finish near the collarbone or upper chest depending on grip.",
+        "Control the return until the lats lengthen fully."
+      ],
+      "tips": [
+        "Think elbows down rather than bar down.",
+        "Use a slight torso angle only if it keeps tension in the lats.",
+        "Pause briefly in the contracted position."
+      ],
+      "common_mistakes": [
+        "Leaning too far back and turning the move into a row.",
+        "Shrugging into the pull instead of depressing the scapula.",
+        "Losing control at the top stretch."
+      ],
+      "variations": ["Close Grip Pulldown", "Pull-Ups", "Single-Arm Pulldown"],
+      "summary": "A vertical pull pattern built around scapular depression and full lat lengthening."
+    },
+    "seated_row": {
+      "primary_muscles": ["Latissimus Dorsi", "Mid Trapezius"],
+      "secondary_muscles": ["Rhomboids", "Biceps Brachii"],
+      "stabilizers": ["Rear Deltoids", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Lats / Mid Back", "percentage": 65},
+        {"muscle": "Rhomboids / Traps", "percentage": 20},
+        {"muscle": "Biceps", "percentage": 15}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Pull",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set the chest proud and feet planted before initiating the row.",
+        "Pull elbows back along the torso and finish with shoulder blades moving last.",
+        "Pause against the body without rounding forward.",
+        "Return with reach but keep the lower back neutral."
+      ],
+      "tips": [
+        "Lead with elbows, not hands.",
+        "Match the handle path to the muscle target: lower for lats, wider for upper back.",
+        "Keep the neck long and shoulders away from the ears."
+      ],
+      "common_mistakes": [
+        "Using torso swing to start the rep.",
+        "Cutting the stretch short on the way forward.",
+        "Jamming the shoulders upward at the finish."
+      ],
+      "variations": ["Single-Arm Cable Row", "Chest-Supported Row", "Seated Row Machine"],
+      "summary": "A horizontal pull pattern that blends lat drive with clean mid-back retraction."
+    },
+    "straight_arm_pushdown": {
+      "primary_muscles": ["Latissimus Dorsi"],
+      "secondary_muscles": ["Teres Major"],
+      "stabilizers": ["Core", "Long Head Triceps"],
+      "muscle_percentages": [
+        {"muscle": "Latissimus Dorsi", "percentage": 75},
+        {"muscle": "Teres Major", "percentage": 15},
+        {"muscle": "Core / Triceps Stabilizers", "percentage": 10}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Control",
+      "instructions": [
+        "Hinge slightly with ribs stacked and arms long.",
+        "Sweep the handle from shoulder height to the pockets without bending the elbows much.",
+        "Pause with the lats shortened and shoulders depressed.",
+        "Return slowly until the lats fully lengthen."
+      ],
+      "tips": [
+        "Think armpits to hips for clean lat engagement.",
+        "Use the torso angle that lets the lats stay in front of the shoulders.",
+        "Keep a soft elbow bend but do not row the handle."
+      ],
+      "common_mistakes": [
+        "Bending the elbows and turning it into a triceps move.",
+        "Snapping the torso to finish the range.",
+        "Letting shoulders climb toward the ears."
+      ],
+      "variations": ["Single-Arm Straight Arm Pulldown", "Cable Prayer Pulldown", "Machine Pullover"],
+      "summary": "A lat isolation movement that teaches shoulder extension without elbow-driven rowing."
+    },
+    "rear_delt_fly": {
+      "primary_muscles": ["Rear Deltoids"],
+      "secondary_muscles": ["Mid Trapezius", "Rhomboids"],
+      "stabilizers": ["Rotator Cuff"],
+      "muscle_percentages": [
+        {"muscle": "Rear Deltoids", "percentage": 70},
+        {"muscle": "Mid Traps / Rhomboids", "percentage": 20},
+        {"muscle": "Rotator Cuff", "percentage": 10}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Control",
+      "instructions": [
+        "Set the chest into the pad or hinge and keep the neck quiet.",
+        "Open the arms wide with elbows soft and hands following the rear delts.",
+        "Pause when the upper arm lines up with the torso.",
+        "Return with control and stay out of the traps."
+      ],
+      "tips": [
+        "Lead with elbows and think wide arc, not squeeze the hands back.",
+        "Use lighter loading and prioritize shoulder position.",
+        "Keep ribs down so upper back stays stable."
+      ],
+      "common_mistakes": [
+        "Shrugging into the rep.",
+        "Bouncing the start position.",
+        "Turning the move into a row by bending the elbows too much."
+      ],
+      "variations": ["Cable Rear Delt Fly", "Reverse Pec Deck", "Chest-Supported Rear Delt Raise"],
+      "summary": "A rear-shoulder isolation movement built for posture, scapular control, and shoulder balance."
+    },
+    "bicep_curl": {
+      "primary_muscles": ["Biceps Brachii"],
+      "secondary_muscles": ["Brachialis"],
+      "stabilizers": ["Forearms", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Biceps Brachii", "percentage": 75},
+        {"muscle": "Brachialis", "percentage": 15},
+        {"muscle": "Forearms", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Lock the upper arm near the torso and start from full elbow extension.",
+        "Curl the weight by flexing the elbow without torso sway.",
+        "Squeeze the biceps at the top for a clean finish.",
+        "Lower slower than you lifted."
+      ],
+      "tips": [
+        "Keep wrists neutral and grip firm but not death-tight.",
+        "Think pinkies slightly up near the top to finish supination.",
+        "Stay tall instead of leaning the rep backward."
+      ],
+      "common_mistakes": [
+        "Swinging the torso to start the curl.",
+        "Letting elbows drift forward and losing tension.",
+        "Dropping the eccentric."
+      ],
+      "variations": ["Cable Curl", "Incline Dumbbell Curl", "Machine Curl"],
+      "summary": "A classic elbow-flexion pattern emphasizing smooth tension and clean arm positioning."
+    },
+    "hammer_curl": {
+      "primary_muscles": ["Brachialis"],
+      "secondary_muscles": ["Biceps Brachii", "Brachioradialis"],
+      "stabilizers": ["Forearms", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Brachialis", "percentage": 55},
+        {"muscle": "Biceps Brachii", "percentage": 25},
+        {"muscle": "Brachioradialis / Forearms", "percentage": 20}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Start with thumbs-forward grip and elbows fixed near the ribs.",
+        "Curl without rotating the handles and keep wrists stacked.",
+        "Pause at the top where the forearm is fully folded.",
+        "Lower slowly and maintain neutral grip through the bottom."
+      ],
+      "tips": [
+        "Think handle to shoulder, not shoulder to handle.",
+        "Keep the humerus quiet so the forearm does the work.",
+        "Use neutral wrists to bias the brachialis and forearm."
+      ],
+      "common_mistakes": [
+        "Turning the curl into a swing.",
+        "Losing neutral grip and supinating halfway up.",
+        "Rushing the lowering phase."
+      ],
+      "variations": ["Cross-Body Hammer Curl", "Rope Hammer Curl", "Incline Hammer Curl"],
+      "summary": "A neutral-grip curl that builds arm density through brachialis and forearm emphasis."
+    },
+    "wrist_curl": {
+      "primary_muscles": ["Forearm Flexors"],
+      "secondary_muscles": ["Grip Muscles"],
+      "stabilizers": ["Biceps Tendon"],
+      "muscle_percentages": [
+        {"muscle": "Forearm Flexors", "percentage": 80},
+        {"muscle": "Grip Muscles", "percentage": 15},
+        {"muscle": "Elbow Stabilizers", "percentage": 5}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Control",
+      "instructions": [
+        "Support the forearms and let the wrists hang free of the bench edge.",
+        "Open the fingers slightly to lengthen the flexors, then curl the bar into the palm.",
+        "Finish by flexing the wrists without lifting the elbows.",
+        "Lower under complete control."
+      ],
+      "tips": [
+        "Use shorter ranges and higher quality reps.",
+        "Let the hands open just enough to create a stretch, not a grip reset.",
+        "Keep shoulders relaxed and torso still."
+      ],
+      "common_mistakes": [
+        "Moving the elbows instead of the wrists.",
+        "Using too much weight and shortening the range.",
+        "Bouncing off the bottom stretch."
+      ],
+      "variations": ["Barbell Wrist Curl", "Behind-the-Back Wrist Curl", "Cable Wrist Curl"],
+      "summary": "A forearm-focused accessory for wrist flexor strength, grip endurance, and arm balance."
+    },
+    "reverse_wrist_curl": {
+      "primary_muscles": ["Forearm Extensors"],
+      "secondary_muscles": ["Brachioradialis"],
+      "stabilizers": ["Grip Muscles"],
+      "muscle_percentages": [
+        {"muscle": "Forearm Extensors", "percentage": 75},
+        {"muscle": "Brachioradialis", "percentage": 15},
+        {"muscle": "Grip Muscles", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Pull",
+      "strength_focus": "Control",
+      "instructions": [
+        "Set forearms on support with palms facing down.",
+        "Lift the back of the hand by extending at the wrist.",
+        "Pause briefly in the top position.",
+        "Lower back into stretch without dropping the implement."
+      ],
+      "tips": [
+        "Use lighter weights than you think.",
+        "Stay patient at the top and own the contraction.",
+        "This works best with strict reps and no elbow movement."
+      ],
+      "common_mistakes": [
+        "Using momentum to snap the wrists up.",
+        "Shrugging or tensing the neck.",
+        "Cutting the eccentric short."
+      ],
+      "variations": ["Cable Reverse Wrist Curl", "Dumbbell Reverse Curl Hold", "Pronated Wrist Curl"],
+      "summary": "A targeted extensor accessory that improves forearm balance and elbow resilience."
+    },
+    "shoulder_press": {
+      "primary_muscles": ["Anterior Deltoids"],
+      "secondary_muscles": ["Lateral Deltoids", "Triceps Brachii"],
+      "stabilizers": ["Upper Trapezius", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Anterior Deltoids", "percentage": 60},
+        {"muscle": "Lateral Deltoids", "percentage": 20},
+        {"muscle": "Triceps Brachii", "percentage": 20}
+      ],
+      "difficulty": "Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Push",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set the seat so handles begin near chin-to-ear height.",
+        "Brace the trunk and press straight overhead through the palm center.",
+        "Finish with biceps near ears without shrugging hard into the top.",
+        "Lower to a controlled bottom while keeping the forearm vertical."
+      ],
+      "tips": [
+        "Keep your chin tucked enough to create a clean press path.",
+        "Lock the ribcage down so the shoulders, not the low back, own the motion.",
+        "Use a stable tempo and stay out of the traps until the last inch."
+      ],
+      "common_mistakes": [
+        "Overarching the back to chase range.",
+        "Letting elbows drift too far behind the handle path.",
+        "Shrugging aggressively from the start of each rep."
+      ],
+      "variations": ["Dumbbell Shoulder Press", "Arnold Press", "Landmine Press"],
+      "summary": "A vertical pressing movement focused on strong shoulder output with controlled overhead mechanics."
+    },
+    "lateral_raise": {
+      "primary_muscles": ["Lateral Deltoids"],
+      "secondary_muscles": ["Supraspinatus"],
+      "stabilizers": ["Upper Trapezius", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Lateral Deltoids", "percentage": 75},
+        {"muscle": "Supraspinatus", "percentage": 15},
+        {"muscle": "Upper Traps / Core", "percentage": 10}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Push",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Start with soft elbows and hands slightly in front of the body.",
+        "Raise the arms out and away until elbows reach shoulder height.",
+        "Lead with the elbows and keep wrists quiet.",
+        "Lower slowly to maintain tension."
+      ],
+      "tips": [
+        "Think wide reach, not dump the pinkies.",
+        "Keep traps quiet and shoulders long.",
+        "Small body english is acceptable only after strict reps are gone."
+      ],
+      "common_mistakes": [
+        "Shrugging from the first inch.",
+        "Swinging the torso to create speed.",
+        "Taking the hands too high and losing the lateral delt."
+      ],
+      "variations": ["Machine Lateral Raise", "Cable Lateral Raise", "Lean-Away Raise"],
+      "summary": "A shoulder-width builder emphasizing clean abduction and trap restraint."
+    },
+    "face_pull": {
+      "primary_muscles": ["Rear Deltoids"],
+      "secondary_muscles": ["External Rotators", "Mid Trapezius"],
+      "stabilizers": ["Lower Trapezius", "Core"],
+      "muscle_percentages": [
+        {"muscle": "Rear Deltoids", "percentage": 50},
+        {"muscle": "Rotator Cuff / External Rotators", "percentage": 25},
+        {"muscle": "Mid / Lower Traps", "percentage": 25}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Pull",
+      "strength_focus": "Control",
+      "instructions": [
+        "Set the cable high enough to pull toward the bridge of the nose or forehead.",
+        "Lead with elbows high and finish by rotating the hands apart.",
+        "Pause with upper arms level to the floor.",
+        "Return slowly while keeping ribs stacked."
+      ],
+      "tips": [
+        "Think pull then rotate, not one rushed motion.",
+        "Use rope separation at the end to light up the rear shoulder.",
+        "Keep the neck neutral and shoulders out of the ears."
+      ],
+      "common_mistakes": [
+        "Turning it into a row by dropping the elbows.",
+        "Using too much load and losing rotation.",
+        "Leaning backward to finish the rep."
+      ],
+      "variations": ["Band Face Pull", "Cable External Rotation Pull", "Rear Delt Fly"],
+      "summary": "A shoulder health staple that blends rear-delt work with upper-back control and external rotation."
+    },
+    "russian_twist": {
+      "primary_muscles": ["Obliques"],
+      "secondary_muscles": ["Rectus Abdominis"],
+      "stabilizers": ["Hip Flexors", "Deep Core"],
+      "muscle_percentages": [
+        {"muscle": "Obliques", "percentage": 60},
+        {"muscle": "Rectus Abdominis", "percentage": 20},
+        {"muscle": "Deep Core / Hip Flexors", "percentage": 20}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Core",
+      "strength_focus": "Control",
+      "instructions": [
+        "Set a tall chest and brace before rotating.",
+        "Turn through the ribs instead of only moving the arms.",
+        "Keep the pelvis as quiet as possible while the trunk rotates.",
+        "Move side to side with equal control."
+      ],
+      "tips": [
+        "Smaller controlled turns beat fast sloppy touches.",
+        "Exhale as you rotate into the hard side.",
+        "Use heel contact or feet up only if you can keep posture."
+      ],
+      "common_mistakes": [
+        "Rounding the spine and chasing the floor.",
+        "Throwing the weight with the arms.",
+        "Letting the hips rock excessively."
+      ],
+      "variations": ["Cable Rotation", "Landmine Twist", "Dead Bug Reach"],
+      "summary": "A rotational trunk pattern aimed at oblique control rather than speed alone."
+    },
+    "plank": {
+      "primary_muscles": ["Rectus Abdominis", "Transverse Abdominis"],
+      "secondary_muscles": ["Obliques", "Serratus Anterior"],
+      "stabilizers": ["Glutes", "Shoulder Stabilizers"],
+      "muscle_percentages": [
+        {"muscle": "Deep Core", "percentage": 55},
+        {"muscle": "Rectus Abdominis / Obliques", "percentage": 25},
+        {"muscle": "Glutes / Shoulders", "percentage": 20}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isometric",
+      "movement_pattern": "Core",
+      "strength_focus": "Control",
+      "instructions": [
+        "Set elbows under shoulders and drive the floor away.",
+        "Brace ribs down and squeeze glutes to flatten the body line.",
+        "Breathe shallowly through the brace rather than holding your breath.",
+        "Maintain one clean line from head to heels."
+      ],
+      "tips": [
+        "Shorter perfect holds are more valuable than long compromised ones.",
+        "Reach the forearms forward to increase serratus tension.",
+        "Think zipper ribs to pelvis."
+      ],
+      "common_mistakes": [
+        "Letting the low back sag.",
+        "Piking the hips too high to make the hold easier.",
+        "Holding the breath and losing tension rhythm."
+      ],
+      "variations": ["Body Saw", "RKC Plank", "Plank Shoulder Tap"],
+      "summary": "A high-value isometric core drill for trunk stiffness, bracing, and shoulder integrity."
+    },
+    "leg_curl": {
+      "primary_muscles": ["Hamstrings"],
+      "secondary_muscles": ["Gastrocnemius"],
+      "stabilizers": ["Glutes"],
+      "muscle_percentages": [
+        {"muscle": "Hamstrings", "percentage": 80},
+        {"muscle": "Gastrocnemius", "percentage": 10},
+        {"muscle": "Glutes", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Set the machine axis in line with the knee and the pad just above the heel.",
+        "Brace the hips down into the pad before curling.",
+        "Drive the heel toward the glute with no hip lift.",
+        "Lower fully to lengthen the hamstrings."
+      ],
+      "tips": [
+        "Point toes slightly away if it helps reduce calf takeover.",
+        "Pause in the squeeze to own the shortened position.",
+        "Use complete range before adding load."
+      ],
+      "common_mistakes": [
+        "Lifting the hips off the pad.",
+        "Rushing the eccentric.",
+        "Using too much weight and stopping short of full bend."
+      ],
+      "variations": ["Seated Leg Curl", "Single-Leg Curl", "Swiss Ball Hamstring Curl"],
+      "summary": "A hamstring-focused curl that builds knee flexor strength and posterior chain balance."
+    },
+    "hip_abduction": {
+      "primary_muscles": ["Glute Medius"],
+      "secondary_muscles": ["Glute Minimus"],
+      "stabilizers": ["Tensor Fasciae Latae"],
+      "muscle_percentages": [
+        {"muscle": "Glute Medius", "percentage": 70},
+        {"muscle": "Glute Minimus", "percentage": 20},
+        {"muscle": "TFL / Stabilizers", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Control",
+      "instructions": [
+        "Sit tall and set the pads against the outer thighs.",
+        "Drive the knees apart with hips staying square in the seat.",
+        "Pause in the open position and squeeze the outer glutes.",
+        "Return slowly without slamming the stack."
+      ],
+      "tips": [
+        "A slight forward torso lean may improve glute bias.",
+        "Keep tension all the way back in.",
+        "Use this as control work, not momentum work."
+      ],
+      "common_mistakes": [
+        "Throwing the pads apart with speed.",
+        "Rounding the low back to chase range.",
+        "Relaxing completely between reps."
+      ],
+      "variations": ["Mini-Band Abduction", "Cable Hip Abduction", "Lateral Walk"],
+      "summary": "A glute medius accessory that supports hip stability, pelvic control, and knee-friendly training."
+    },
+    "hip_adduction": {
+      "primary_muscles": ["Adductors"],
+      "secondary_muscles": ["Gracilis"],
+      "stabilizers": ["Core"],
+      "muscle_percentages": [
+        {"muscle": "Adductors", "percentage": 75},
+        {"muscle": "Gracilis / Inner Thigh", "percentage": 15},
+        {"muscle": "Core", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Control",
+      "instructions": [
+        "Sit upright with pads placed on the inner thigh.",
+        "Draw the legs together under control without collapsing the chest.",
+        "Pause at the squeeze and keep the pelvis steady.",
+        "Return slowly to the stretch."
+      ],
+      "tips": [
+        "Think thighs in rather than feet in.",
+        "Do not bounce out of the stretch.",
+        "Use a range that keeps the pelvis planted."
+      ],
+      "common_mistakes": [
+        "Slamming the pads together.",
+        "Rounding or rocking the torso.",
+        "Using weight that removes end-range control."
+      ],
+      "variations": ["Copenhagen Plank", "Cable Adduction", "Adductor Slide"],
+      "summary": "An inner-thigh focused accessory that supports pelvic control and frontal-plane balance."
+    },
+    "glute_bridge": {
+      "primary_muscles": ["Glutes"],
+      "secondary_muscles": ["Hamstrings"],
+      "stabilizers": ["Core", "Adductors"],
+      "muscle_percentages": [
+        {"muscle": "Glutes", "percentage": 70},
+        {"muscle": "Hamstrings", "percentage": 20},
+        {"muscle": "Core / Adductors", "percentage": 10}
+      ],
+      "difficulty": "Beginner-Intermediate",
+      "exercise_type": "Compound",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Strength",
+      "instructions": [
+        "Set feet so shins are near vertical at the top.",
+        "Brace ribs down before driving through the heels.",
+        "Lift the hips until glutes lock out without lumbar extension.",
+        "Lower with control and keep the knees tracking straight."
+      ],
+      "tips": [
+        "Think tailbone to knees long at the top.",
+        "Push the floor away instead of arching up.",
+        "Use a brief pause in lockout to own the glute finish."
+      ],
+      "common_mistakes": [
+        "Overarching the low back in the top position.",
+        "Setting the feet too far away and overusing hamstrings.",
+        "Letting knees cave inward."
+      ],
+      "variations": ["Barbell Hip Thrust", "Single-Leg Bridge", "Feet-Elevated Bridge"],
+      "summary": "A glute-dominant hip extension pattern for posterior chain strength and pelvic control."
+    },
+    "terminal_knee_extension": {
+      "primary_muscles": ["Quadriceps"],
+      "secondary_muscles": ["Vastus Medialis"],
+      "stabilizers": ["Glutes", "Calves"],
+      "muscle_percentages": [
+        {"muscle": "Quadriceps", "percentage": 65},
+        {"muscle": "Vastus Medialis", "percentage": 20},
+        {"muscle": "Glute / Calf Stabilizers", "percentage": 15}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Control",
+      "instructions": [
+        "Start with a soft bend at the knee and tension already on the band or cable.",
+        "Drive the knee to full extension by squeezing the quad.",
+        "Pause in the locked-out position for clean VMO engagement.",
+        "Return with the foot flat and hips quiet."
+      ],
+      "tips": [
+        "Think knee cap up and thigh tight.",
+        "Stay tall and let the quad finish the rep.",
+        "Use moderate tension and precise reps."
+      ],
+      "common_mistakes": [
+        "Rocking the whole body to create extension.",
+        "Snapping the knee instead of controlling the finish.",
+        "Letting the arch collapse as you press back."
+      ],
+      "variations": ["Band TKE", "Spanish Squat Hold", "Leg Extension Isometric"],
+      "summary": "A knee-friendly quad drill built for terminal extension control and joint confidence."
+    },
+    "calf_raise": {
+      "primary_muscles": ["Gastrocnemius"],
+      "secondary_muscles": ["Soleus"],
+      "stabilizers": ["Foot Intrinsics"],
+      "muscle_percentages": [
+        {"muscle": "Gastrocnemius", "percentage": 60},
+        {"muscle": "Soleus", "percentage": 30},
+        {"muscle": "Foot / Ankle Stabilizers", "percentage": 10}
+      ],
+      "difficulty": "Beginner",
+      "exercise_type": "Isolation",
+      "movement_pattern": "Lower Body",
+      "strength_focus": "Hypertrophy",
+      "instructions": [
+        "Set the ball of the foot on the platform with a controlled heel drop.",
+        "Drive straight up through the big toe and second toe.",
+        "Pause in the top squeeze and stay tall through the torso.",
+        "Lower slowly into full calf stretch."
+      ],
+      "tips": [
+        "Use the longest pain-free range you can control.",
+        "Keep pressure even across the forefoot.",
+        "Treat each rep as pause-stretch, pause-squeeze."
+      ],
+      "common_mistakes": [
+        "Bouncing through the bottom.",
+        "Rolling to the outside of the foot.",
+        "Cutting the top contraction short."
+      ],
+      "variations": ["Seated Calf Raise", "Single-Leg Calf Raise", "Donkey Calf Raise"],
+      "summary": "A lower-leg accessory designed to build calf size, ankle stiffness, and controlled stretch tolerance."
+    }
+  },
+  "profiles": {
+    "Chest Press Machine": {"template": "horizontal_press", "equipment": "Chest Press Machine", "tags": ["Chest", "Strength", "Compound", "Push"], "hero_image": "chest_press_machine.png", "start_image": "chest_press_machine.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Incline Dumbbell Press": {"template": "incline_press", "equipment": "Dumbbells, Incline Bench", "tags": ["Chest", "Strength", "Compound", "Push"], "hero_image": "incline_dumbbell_press.png", "start_image": "incline_dumbbell_press.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Pec Deck Fly": {"template": "chest_fly", "equipment": "Pec Deck Machine", "tags": ["Chest", "Isolation", "Hypertrophy", "Push"], "hero_image": "pec_deck_fly.png", "start_image": "pec_deck_fly.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Cable Chest Fly": {"template": "chest_fly", "equipment": "Dual Cable Station", "tags": ["Chest", "Isolation", "Hypertrophy", "Push"], "hero_image": "cable_chest_fly.png", "start_image": "cable_chest_fly.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Tricep Pushdown": {"template": "tricep_pushdown", "equipment": "Cable Station", "tags": ["Triceps", "Isolation", "Cable", "Push"], "hero_image": "tricep_pushdown.png", "start_image": "tricep_pushdown.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Overhead Tricep Extension": {"template": "overhead_tricep", "equipment": "Dumbbell or Cable", "tags": ["Triceps", "Isolation", "Stretch", "Push"], "hero_image": "overhead_tricep_extension.png", "start_image": "overhead_tricep_extension.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Crunch": {"template": "crunch", "equipment": "Mat or Ab Bench", "tags": ["Core", "Isolation", "Control", "Abs"], "hero_image": "crunch.png", "start_image": "crunch.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Wide Grip Lat Pulldown": {"template": "lat_pulldown", "equipment": "Lat Pulldown Machine", "tags": ["Back", "Strength", "Compound", "Pull"], "hero_image": "wide_grip_lat_pulldown.png", "start_image": "wide_grip_lat_pulldown.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Close Grip Pulldown": {"template": "lat_pulldown", "equipment": "Lat Pulldown Machine", "tags": ["Back", "Strength", "Compound", "Pull"], "hero_image": "wide_grip_lat_pulldown.png", "start_image": "wide_grip_lat_pulldown.png", "end_image": "", "side_image": "", "top_image": "", "tips": ["Keep elbows tight to the torso to bias the lower lats.", "Stay tall and avoid turning the pull into a row.", "Pause at the chest and own the squeeze."], "variations": ["Neutral Grip Pulldown", "Single-Arm Pulldown", "Assisted Chin-Up"]},
+    "Seated Row Machine": {"template": "seated_row", "equipment": "Seated Row Machine", "tags": ["Back", "Strength", "Compound", "Pull"], "hero_image": "seated_row_machine.png", "start_image": "seated_row_machine.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Straight Arm Pushdown": {"template": "straight_arm_pushdown", "equipment": "Cable Station", "tags": ["Lats", "Isolation", "Control", "Pull"], "hero_image": "straight_arm_pushdown.png", "start_image": "straight_arm_pushdown.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Rear Delt Machine Fly": {"template": "rear_delt_fly", "equipment": "Reverse Pec Deck", "tags": ["Shoulders", "Isolation", "Posture", "Pull"], "hero_image": "rear_delt_machine_fly.png", "start_image": "rear_delt_machine_fly.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Bicep Curl": {"template": "bicep_curl", "equipment": "Barbell or Machine Curl", "tags": ["Arms", "Isolation", "Hypertrophy", "Pull"], "hero_image": "bicep_curl.png", "start_image": "bicep_curl.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Hammer Curl": {"template": "hammer_curl", "equipment": "Dumbbells or Rope Cable", "tags": ["Arms", "Isolation", "Neutral Grip", "Pull"], "hero_image": "hammer_curl.png", "start_image": "hammer_curl.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Wrist Curl": {"template": "wrist_curl", "equipment": "Barbell or Dumbbell", "tags": ["Forearms", "Isolation", "Grip", "Pull"], "hero_image": "bicep_curl.png", "start_image": "bicep_curl.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Reverse Wrist Curl": {"template": "reverse_wrist_curl", "equipment": "Barbell or Dumbbell", "tags": ["Forearms", "Isolation", "Grip", "Pull"], "hero_image": "hammer_curl.png", "start_image": "hammer_curl.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Shoulder Press Machine": {"template": "shoulder_press", "equipment": "Shoulder Press Machine", "tags": ["Shoulders", "Strength", "Compound", "Push"], "hero_image": "shoulder_press_machine.png", "start_image": "shoulder_press_machine.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Machine Lateral Raise": {"template": "lateral_raise", "equipment": "Lateral Raise Machine", "tags": ["Shoulders", "Isolation", "Hypertrophy", "Push"], "hero_image": "machine_lateral_raise.png", "start_image": "machine_lateral_raise.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Face Pull": {"template": "face_pull", "equipment": "Cable Station with Rope", "tags": ["Shoulders", "Posture", "Control", "Pull"], "hero_image": "straight_arm_pushdown.png", "start_image": "straight_arm_pushdown.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Dumbbell Lateral Raise": {"template": "lateral_raise", "equipment": "Dumbbells", "tags": ["Shoulders", "Isolation", "Hypertrophy", "Push"], "hero_image": "dumbbell_lateral_raise.png", "start_image": "dumbbell_lateral_raise.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Standing Calf Raise": {"template": "calf_raise", "equipment": "Standing Calf Raise Machine", "tags": ["Calves", "Isolation", "Lower Body", "Strength"], "hero_image": "standing_calf_raise.png", "start_image": "standing_calf_raise.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Russian Twist": {"template": "russian_twist", "equipment": "Bodyweight or Light Plate", "tags": ["Core", "Rotation", "Control", "Abs"], "hero_image": "russian_twist.png", "start_image": "russian_twist.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Leg Curl": {"template": "leg_curl", "equipment": "Leg Curl Machine", "tags": ["Hamstrings", "Isolation", "Lower Body", "Strength"], "hero_image": "leg_curl.png", "start_image": "leg_curl.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Hip Abduction Machine": {"template": "hip_abduction", "equipment": "Hip Abduction Machine", "tags": ["Glutes", "Isolation", "Lower Body", "Control"], "hero_image": "leg_extension.png", "start_image": "leg_extension.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Hip Adduction Machine": {"template": "hip_adduction", "equipment": "Hip Adduction Machine", "tags": ["Adductors", "Isolation", "Lower Body", "Control"], "hero_image": "leg_extension.png", "start_image": "leg_extension.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Glute Bridge Machine": {"template": "glute_bridge", "equipment": "Glute Bridge or Hip Thrust Machine", "tags": ["Glutes", "Strength", "Compound", "Lower Body"], "hero_image": "leg_press_machine.png", "start_image": "leg_press_machine.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Terminal Knee Extensions": {"template": "terminal_knee_extension", "equipment": "Band or Cable", "tags": ["Rehab", "Quadriceps", "Control", "Lower Body"], "hero_image": "leg_extension.png", "start_image": "leg_extension.png", "end_image": "", "side_image": "", "top_image": ""},
+    "Plank": {"template": "plank", "equipment": "Bodyweight", "tags": ["Core", "Isometric", "Control", "Stability"], "hero_image": "plank.png", "start_image": "plank.png", "end_image": "", "side_image": "", "top_image": ""}
+  }
+}

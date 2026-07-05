@@ -64,9 +64,9 @@ def render_smart_scale_import_page(body_path: Path):
                 out.to_csv(body_path, index=False)
                 st.session_state.smart_scale_sync_summary = {
                     "message": result.message,
-                    "pulled": result.pulled,
+                    "found": result.pulled,
                     "duplicates": result.duplicates,
-                    "invalid": result.invalid,
+                    "errors": result.invalid,
                     "added": result.added,
                 }
                 # Ensure all pages read latest body_stats.csv immediately.
@@ -76,10 +76,10 @@ def render_smart_scale_import_page(body_path: Path):
     if sync_summary:
         st.success(sync_summary["message"])
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Pulled", str(sync_summary["pulled"]))
-        s2.metric("Duplicates Skipped", str(sync_summary["duplicates"]))
-        s3.metric("Invalid Skipped", str(sync_summary["invalid"]))
-        s4.metric("Added", str(sync_summary["added"]))
+        s1.metric("Found", str(sync_summary["found"]))
+        s2.metric("Added", str(sync_summary["added"]))
+        s3.metric("Skipped Duplicates", str(sync_summary["duplicates"]))
+        s4.metric("Errors", str(sync_summary["errors"]))
 
     st.markdown("---")
     st.markdown("### CSV Smart Scale Import (Backup)")
