@@ -101,6 +101,21 @@ def render_smart_scale_import_page(body_path: Path):
 
     auto_mapping, _ = infer_column_mapping(list(imported_raw.columns))
 
+    normalized_headers = {str(c).strip().lower() for c in imported_raw.columns}
+    renpho_signatures = {
+        "weight(lb)",
+        "muscle mass(lb)",
+        "body fat(%)",
+        "body water(%)",
+        "protein (%)",
+        "visceral fat",
+        "bmr(kcal)",
+        "metabolic age",
+        "bone mass(lb)",
+        "bmi",
+    }
+    default_import_source_index = 1 if renpho_signatures.issubset(normalized_headers) else 5
+
     st.markdown("### Column Mapping")
     st.caption("Auto-mapping is applied first. Use manual mapping for any missing field.")
     manual_mapping = dict(auto_mapping)
@@ -108,7 +123,7 @@ def render_smart_scale_import_page(body_path: Path):
     import_source = st.selectbox(
         "Import Source",
         ["Manual", "RENPHO", "Eufy", "Withings", "Garmin", "CSV Import", "Unknown"],
-        index=5,
+        index=default_import_source_index,
         key="smart_scale_import_source",
     )
 

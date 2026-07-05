@@ -1,4 +1,6 @@
 date,body_weight_lbs,goal_weight_lbs,waist_in,body_fat_pct,muscle_mass_lbs,bmi,water_pct,protein_pct,bone_mass_lbs,bmr_cal,metabolic_age,visceral_fat,lean_body_mass_lbs,notes,import_source
+2026-06-26,307.2,,,34.1,145.1,39.1,47.2,14.9,8.6,2150.0,41.0,18.0,,,RENPHO
+2026-06-27,308.6,,,,145.4,39.3,47.1,15.0,8.7,2153.0,41.0,18.0,,,RENPHO
 2026-06-29,184.2,,,21.2,80.1,25.4,53.2,17.1,7.4,1780.0,39.0,9.1,145.2,,Manual
 2026-06-30,183.8,,,21.0,80.3,25.3,53.4,17.1,7.5,1785.0,39.0,9.0,145.5,,Manual
 2026-07-01,183.5,,,20.9,80.6,25.2,53.7,17.2,7.5,1790.0,38.0,8.9,145.8,,Manual

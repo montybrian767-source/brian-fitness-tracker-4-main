@@ -59,14 +59,14 @@ FIELD_LABELS = {
 
 ALIASES = {
     "date": ["date", "weigh in date", "measurement date", "timestamp", "time"],
-    "body_weight_lbs": ["weight", "body weight", "weight lb", "weight lbs", "weight (lb)", "weight (lbs)"],
-    "body_fat_pct": ["body fat", "body fat %", "fat %", "fat percentage", "bodyfat"],
-    "muscle_mass_lbs": ["muscle mass", "muscle", "skeletal muscle", "muscle mass lb"],
+    "body_weight_lbs": ["weight", "body weight", "weight lb", "weight lbs", "weight (lb)", "weight (lbs)", "weight(lb)"],
+    "body_fat_pct": ["body fat", "body fat %", "fat %", "fat percentage", "bodyfat", "body fat(%)"],
+    "muscle_mass_lbs": ["muscle mass", "muscle", "skeletal muscle", "muscle mass lb", "muscle mass(lb)"],
     "bmi": ["bmi", "body mass index"],
-    "water_pct": ["water", "water %", "body water", "body water %", "hydration"],
-    "protein_pct": ["protein", "protein %", "protein ratio"],
-    "bone_mass_lbs": ["bone mass", "bone", "bone mass lb"],
-    "bmr_cal": ["bmr", "bmr cal", "basal metabolic rate", "metabolism", "kcal"],
+    "water_pct": ["water", "water %", "body water", "body water %", "hydration", "body water(%)"],
+    "protein_pct": ["protein", "protein %", "protein ratio", "protein (%)"],
+    "bone_mass_lbs": ["bone mass", "bone", "bone mass lb", "bone mass(lb)"],
+    "bmr_cal": ["bmr", "bmr cal", "basal metabolic rate", "metabolism", "kcal", "bmr(kcal)"],
     "visceral_fat": ["visceral fat", "visceral", "vf"],
     "metabolic_age": ["metabolic age", "body age"],
     "lean_body_mass_lbs": ["lean body mass", "lbm", "fat free mass", "lean mass"],
@@ -100,7 +100,17 @@ def _to_numeric(series: pd.Series) -> pd.Series:
 
 
 def read_uploaded_csv(file_bytes: bytes) -> pd.DataFrame:
-    return pd.read_csv(BytesIO(file_bytes))
+    df = pd.read_csv(BytesIO(file_bytes))
+
+    # Normalize headers/values from vendor exports before mapping.
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.replace({"--": pd.NA, " -- ": pd.NA})
+
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]):
+            df[col] = df[col].astype(str).str.strip().replace({"": pd.NA, "nan": pd.NA})
+
+    return df
 
 
 def infer_column_mapping(columns: List[str]) -> Tuple[Dict[str, str], List[str]]:
@@ -162,7 +172,11 @@ def analyze_import(df_import_raw: pd.DataFrame, df_existing: pd.DataFrame, mappi
     records_found = len(standardized)
 
     invalid_date = standardized["date"].isna() | (standardized["date"].astype(str).str.strip() == "")
-    metric_cols = [c for c in standardized.columns if c not in ["date", "goal_weight_lbs", "waist_in", "notes"]]
+    metric_cols = [
+        c
+        for c in standardized.columns
+        if c not in ["date", "goal_weight_lbs", "waist_in", "notes", "import_source"]
+    ]
     no_numeric = standardized[metric_cols].isna().all(axis=1)
     invalid_rows_mask = invalid_date | no_numeric
     invalid_rows = int(invalid_rows_mask.sum())
@@ -251,11 +265,42 @@ def dashboard_body_metrics(df_body: pd.DataFrame) -> Dict[str, str]:
             "ai_summary": "No valid body dates available.",
         }
 
-    latest = d.iloc[-1]
+    source_norm = d.get("import_source", pd.Series("", index=d.index)).astype(str).str.strip().str.upper()
+    preferred_sources = {"RENPHO", "CSV IMPORT"}
+    preferred_rows = d[source_norm.isin(preferred_sources)].copy()
+
+    def _filter_scale_outliers(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        w = pd.to_numeric(df.get("body_weight_lbs", pd.Series(dtype=float)), errors="coerce")
+        valid = w.notna() & (w > 0)
+        if valid.sum() < 3:
+            return df.loc[valid].copy() if valid.any() else df
+
+        median_weight = float(w.loc[valid].median())
+        max_deviation = max(40.0, median_weight * 0.15)
+        non_outlier = valid & ((w - median_weight).abs() <= max_deviation)
+        filtered = df.loc[non_outlier].copy()
+
+        # If filtering is too aggressive, keep original valid rows.
+        if filtered.empty:
+            return df.loc[valid].copy()
+        return filtered
+
+    # If valid smart-scale rows exist, use them for latest weight and trends.
+    if not preferred_rows.empty:
+        filtered_scale_rows = _filter_scale_outliers(preferred_rows)
+        working = filtered_scale_rows if not filtered_scale_rows.empty else preferred_rows
+    else:
+        working = d
+
+    weights = pd.to_numeric(working.get("body_weight_lbs", pd.Series(dtype=float)), errors="coerce")
+    valid_weight_mask = weights.notna() & (weights > 0)
+    latest = working.loc[valid_weight_mask].iloc[-1] if valid_weight_mask.any() else working.iloc[-1]
     last_date = latest["date"].strftime("%Y-%m-%d")
 
     def _trend(col: str, suffix: str = ""):
-        s = pd.to_numeric(d.get(col, pd.Series(dtype=float)), errors="coerce").dropna()
+        s = pd.to_numeric(working.get(col, pd.Series(dtype=float)), errors="coerce").dropna()
         if len(s) < 2:
             return "-", "→"
         delta = float(s.iloc[-1] - s.iloc[0])
@@ -267,18 +312,26 @@ def dashboard_body_metrics(df_body: pd.DataFrame) -> Dict[str, str]:
     latest_weight = pd.to_numeric(pd.Series([latest.get("body_weight_lbs")]), errors="coerce").iloc[0]
     latest_weight_text = "-" if pd.isna(latest_weight) else f"{latest_weight:.1f} lbs"
 
-    week_cut = datetime.now() - pd.Timedelta(days=7)
-    w = d[d["date"] >= week_cut].copy()
+    week_cut = latest["date"] - pd.Timedelta(days=7)
+    w = working[working["date"] >= week_cut].copy()
     if len(w) >= 2:
         ws = pd.to_numeric(w.get("body_weight_lbs", pd.Series(dtype=float)), errors="coerce").dropna()
         weekly_change = "-" if len(ws) < 2 else f"{(ws.iloc[-1] - ws.iloc[0]):+.1f} lbs"
     else:
         weekly_change = "-"
 
+    month_cut = latest["date"] - pd.Timedelta(days=30)
+    m = working[working["date"] >= month_cut].copy()
+    if len(m) >= 2:
+        ms = pd.to_numeric(m.get("body_weight_lbs", pd.Series(dtype=float)), errors="coerce").dropna()
+        monthly_change = "-" if len(ms) < 2 else f"{(ms.iloc[-1] - ms.iloc[0]):+.1f} lbs"
+    else:
+        monthly_change = "-"
+
     bf_change, bf_arrow = _trend("body_fat_pct", "%")
     mm_change, mm_arrow = _trend("muscle_mass_lbs", " lbs")
 
-    hydration = pd.to_numeric(d.get("water_pct", pd.Series(dtype=float)), errors="coerce").dropna()
+    hydration = pd.to_numeric(working.get("water_pct", pd.Series(dtype=float)), errors="coerce").dropna()
     hydration_note = "Hydration trend unavailable."
     if len(hydration) >= 2:
         delta = hydration.iloc[-1] - hydration.iloc[0]
@@ -297,6 +350,13 @@ def dashboard_body_metrics(df_body: pd.DataFrame) -> Dict[str, str]:
             observations.append("Weight is decreasing this week.")
         else:
             observations.append("Weight is stable this week.")
+    if monthly_change != "-":
+        if monthly_change.startswith("+"):
+            observations.append("Weight is increasing this month.")
+        elif monthly_change.startswith("-"):
+            observations.append("Weight is decreasing this month.")
+        else:
+            observations.append("Weight is stable this month.")
     if bf_change != "-":
         observations.append("Body fat is decreasing." if bf_arrow == "↓" else "Body fat is increasing." if bf_arrow == "↑" else "Body fat is stable.")
     if mm_change != "-":
@@ -308,6 +368,7 @@ def dashboard_body_metrics(df_body: pd.DataFrame) -> Dict[str, str]:
     return {
         "latest_weight": latest_weight_text,
         "weekly_weight_change": weekly_change,
+        "monthly_weight_change": monthly_change,
         "body_fat_trend": bf_change,
         "muscle_mass_trend": mm_change,
         "last_weigh_in_date": last_date,

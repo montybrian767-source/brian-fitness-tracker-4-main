@@ -1162,6 +1162,24 @@ elif page == "History":
 elif page == "Data Manager":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)
     st.code('data/workout_log.csv\ndata/workouts.csv\ndata/exercise_image_map.csv\ndata/nutrition_log.csv\ndata/body_stats.csv\ndata/supplement_log.csv\ndata/supplement_plan.csv\nassets/exercises/')
+
+    body_df = read_csv_safe(BODY, BODY_COLUMNS)
+    if not body_df.empty and 'date' in body_df.columns and 'import_source' in body_df.columns:
+        body_df = body_df.copy()
+        body_df['date'] = pd.to_datetime(body_df['date'], errors='coerce')
+        body_df = body_df.dropna(subset=['date'])
+        if not body_df.empty:
+            src_norm = body_df['import_source'].astype(str).str.strip().str.upper()
+            scale_rows = body_df[src_norm.isin(['RENPHO', 'CSV IMPORT'])]
+            manual_rows = body_df[src_norm.eq('MANUAL')]
+            if not scale_rows.empty and not manual_rows.empty:
+                latest_scale = scale_rows['date'].max()
+                latest_manual = manual_rows['date'].max()
+                if latest_manual > latest_scale:
+                    st.warning(
+                        f"Data warning: manual rows are newer ({latest_manual.strftime('%Y-%m-%d')}) than latest smart-scale rows ({latest_scale.strftime('%Y-%m-%d')}). Dashboard latest weight may prefer smart-scale data when available."
+                    )
+
     if LOG.exists():
         st.download_button('Export workout_log.csv', LOG.read_bytes(), file_name='workout_log.csv')
     if NUTRITION.exists():
