@@ -111,7 +111,7 @@ class ExerciseIntelligence:
             return df
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        for col in ["weight_lbs", "reps", "rpe", "pain", "volume"]:
+        for col in ["weight_lbs", "reps", "rpe", "pain", "pain_score", "body_feedback_score", "volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df.sort_values("date") if "date" in df.columns else df
@@ -154,7 +154,12 @@ class ExerciseIntelligence:
         latest_weight = float(latest.get("weight_lbs", 0) or 0)
         latest_reps = int(latest.get("reps", 0) or 0)
         latest_rpe = float(latest.get("rpe", 0) or 0)
-        latest_pain = float(latest.get("pain", 0) or 0)
+        if "body_feedback_score" in df.columns:
+            latest_body_feedback = float(latest.get("body_feedback_score", 0) or 0)
+        elif "pain_score" in df.columns:
+            latest_body_feedback = float(latest.get("pain_score", 0) or 0)
+        else:
+            latest_body_feedback = float(latest.get("pain", 0) or 0)
 
         pr_weight = pd.to_numeric(df.get("weight_lbs", pd.Series(dtype=float)), errors="coerce").dropna()
         best_weight = float(pr_weight.max()) if not pr_weight.empty else 0.0
@@ -177,7 +182,7 @@ class ExerciseIntelligence:
         recovery_pct = min(100, 40 + days_since * 14)
 
         recommended_weight = latest_weight
-        if latest_pain >= 4 or latest_rpe >= 9.5:
+        if latest_body_feedback >= 4 or latest_rpe >= 9.5:
             recommended_weight = max(0.0, latest_weight - 5)
         elif latest_rpe <= 7.5 and latest_reps >= 10:
             recommended_weight = latest_weight + 5
@@ -185,12 +190,12 @@ class ExerciseIntelligence:
             recommended_weight = latest_weight + 2.5
 
         confidence = min(97, 45 + (len(df) * 6))
-        if latest_pain >= 4:
+        if latest_body_feedback >= 4:
             confidence = max(35, confidence - 12)
 
         recommendations = []
-        if latest_pain >= 4:
-            recommendations.append("Pain trend is elevated. Keep the load conservative and prioritize controlled execution.")
+        if latest_body_feedback >= 4:
+            recommendations.append("Body feedback trend is elevated. Keep the load conservative and prioritize controlled execution.")
         elif latest_rpe <= 7.5 and latest_reps >= 10:
             recommendations.append("Performance is stable. A small load increase is reasonable next session.")
         else:

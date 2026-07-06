@@ -7,6 +7,8 @@ from typing import Dict, List
 
 import pandas as pd
 
+from engines.muscle_readiness_engine import build_muscle_readiness_snapshot
+
 
 @dataclass
 class AICoachBrief:
@@ -22,6 +24,8 @@ class AICoachBrief:
     nutrition_status: str
     body_trend: str
     weekly_coaching_notes: str
+    muscle_recovery_focus: str
+    avoid_muscles: str
 
 
 def _safe_read(path: Path, columns: List[str]) -> pd.DataFrame:
@@ -203,7 +207,7 @@ def _workout_metrics(log_df: pd.DataFrame) -> Dict[str, str]:
     d = log_df.copy()
     d["date"] = pd.to_datetime(d.get("date"), errors="coerce")
     d = d.dropna(subset=["date"])
-    for col in ["volume", "rpe", "pain", "weight_lbs", "reps"]:
+    for col in ["volume", "rpe", "pain", "pain_score", "body_feedback_score", "weight_lbs", "reps"]:
         d[col] = _to_num(d.get(col, pd.Series(dtype=float))).fillna(0)
 
     week_cut = pd.Timestamp.today() - pd.Timedelta(days=7)
@@ -212,17 +216,22 @@ def _workout_metrics(log_df: pd.DataFrame) -> Dict[str, str]:
     weekly_volume = int(w["volume"].sum()) if not w.empty else 0
     session_count = int(w["date"].dt.strftime("%Y-%m-%d").nunique()) if not w.empty else 0
     avg_rpe = float(w["rpe"].mean()) if not w.empty else 0.0
-    avg_pain = float(w["pain"].mean()) if not w.empty else 0.0
+    if "body_feedback_score" in w.columns:
+        avg_body_feedback = float(w["body_feedback_score"].mean()) if not w.empty else 0.0
+    elif "pain_score" in w.columns:
+        avg_body_feedback = float(w["pain_score"].mean()) if not w.empty else 0.0
+    else:
+        avg_body_feedback = float(w["pain"].mean()) if not w.empty else 0.0
 
     prs = "No PR data yet"
     if "exercise" in d.columns and not d.empty:
         pr_count = d.groupby("exercise")["weight_lbs"].max().dropna().shape[0]
         prs = f"{pr_count} exercises with PR history"
 
-    if avg_pain >= 4:
+    if avg_body_feedback >= 4:
         intensity = "Recovery Day"
-        train_rec = "Pain trend is elevated. Reduce load and prioritize movement quality and recovery."
-        warning = "Recovery warning: pain indicators are elevated."
+        train_rec = "Body feedback trend is elevated. Reduce load and prioritize movement quality and recovery."
+        warning = "Readiness note: body feedback indicators are elevated."
     elif avg_rpe >= 8.5:
         intensity = "Light Session"
         train_rec = "Recent effort is high. Keep today moderate and extend rest between sets."
@@ -262,25 +271,79 @@ def build_daily_brief(
     nutrition = _nutrition_status(nutrition_df)
     supplements = _supplement_completion(supplements_df)
     workouts = _workout_metrics(workout_log_df)
+    muscle_snapshot = build_muscle_readiness_snapshot(
+        workout_log_df=workout_log_df,
+        recovery_df=recovery_df,
+        body_df=body_df,
+    )
+
+    top_ready = muscle_snapshot.get("top_ready", []) or []
+    top_fatigued = muscle_snapshot.get("top_fatigued", []) or []
+    focus = str(muscle_snapshot.get("recommended_workout", "Moderate full-body technique session"))
+    avoid_list = [str(m.get("muscle", "")).title() for m in top_fatigued if str(m.get("status", "")) == "Red"]
+    avoid_text = ", ".join(avoid_list[:3]) if avoid_list else "None"
 
     recovery_pct = int(recovery.get("recovery_pct", 0)) if recovery else 0
     recovery_status = recovery.get("recovery_status", workouts["intensity"]) if recovery else workouts["intensity"]
     recovery_rec = str(recovery.get("recommendation", "No recovery recommendation yet. Compute in Recovery Center."))
+
+    if any(str(m.get("status", "")) == "Red" for m in top_fatigued[:2]):
+        train_mode = "reduce volume"
+    elif recovery_pct >= 85 and any(str(m.get("status", "")) == "Green" for m in top_ready[:3]):
+        train_mode = "train heavy"
+    elif any(str(m.get("status", "")) == "Green" for m in top_ready[:2]):
+        train_mode = "train normal"
+    else:
+        train_mode = "train normal"
 
     readiness = (
         f"Today focus: {focus}. Recovery {recovery_pct}% ({recovery_status}). "
         f"Supplements: {supplements}."
     )
 
-    training_recommendation = (
-        f"{workouts['training_recommendation']} "
-        f"Recovery note: {recovery_rec}"
-    )
+    if train_mode == "train heavy":
+        muscle_guidance = f"Muscle readiness supports heavy work. Focus on {focus}."
+    elif train_mode == "reduce volume":
+        muscle_guidance = f"Legs or target muscles need additional recovery. Reduce volume today and focus on {focus}."
+    else:
+        muscle_guidance = f"Train normal with quality reps. Focus on {focus}."
+
+    if avoid_list:
+        muscle_guidance += f" Avoid: {avoid_text}."
+
+    if top_ready:
+        muscle_guidance += f" {str(top_ready[0].get('muscle', '')).title()} is fully recovered."
+    if top_fatigued:
+        low = top_fatigued[0]
+        if str(low.get("status", "")) in {"Red", "Orange"}:
+            muscle_guidance += f" {str(low.get('muscle', '')).title()} needs additional recovery."
+
+    focus_lower = focus.lower()
+    if "pull" in focus_lower:
+        muscle_guidance += " Train Pull today."
+    elif "push" in focus_lower:
+        muscle_guidance += " Train Push today."
+    elif "leg" in focus_lower:
+        muscle_guidance += " Train Legs today."
+
+    training_recommendation = f"{workouts['training_recommendation']} Recovery note: {recovery_rec}"
+    if train_mode == "train heavy":
+        training_recommendation = f"Train heavy today. {training_recommendation}"
+    elif train_mode == "reduce volume":
+        training_recommendation = f"Reduce volume today. {training_recommendation}"
+    else:
+        training_recommendation = f"Train normal today. {training_recommendation}"
+
+    if avoid_list:
+        training_recommendation += f" Avoid fatigued muscles: {avoid_text}."
+    workout_intensity_recommendation = f"{muscle_guidance} {recovery_rec}"
 
     body_trend = f"Weight {body['latest_weight']} | BF trend {body['body_fat_trend']} | Muscle trend {body['muscle_mass_trend']}"
 
     next_best_action = ""
-    if recovery_status in ["Recovery Day", "Light Session"]:
+    if train_mode == "reduce volume":
+        next_best_action = f"Scale back total sets and avoid {avoid_text if avoid_list else 'fatigued muscle groups'} today."
+    elif recovery_status in ["Recovery Day", "Light Session"]:
         next_best_action = "Run a lighter session today, then prioritize hydration and sleep."
     elif "Below protein target" in nutrition["nutrition_status"]:
         next_best_action = "Finish your workout and close your protein gap with your next meal."
@@ -292,12 +355,13 @@ def build_daily_brief(
     weekly_notes = (
         f"{workouts['weekly_notes']} "
         f"PRs: {workouts['prs']}. "
-        f"Nutrition today: {nutrition['protein_progress']}, {nutrition['hydration_progress']}."
+        f"Nutrition today: {nutrition['protein_progress']}, {nutrition['hydration_progress']}. "
+        f"Muscle readiness mode: {train_mode}; focus: {focus}."
     )
 
     return AICoachBrief(
         readiness_summary=readiness,
-        workout_intensity_recommendation=training_recommendation,
+        workout_intensity_recommendation=workout_intensity_recommendation,
         nutrition_recommendation=nutrition["nutrition_recommendation"],
         hydration_recommendation=nutrition["hydration_recommendation"],
         body_composition_insight=body["summary"],
@@ -308,4 +372,6 @@ def build_daily_brief(
         nutrition_status=nutrition["nutrition_status"],
         body_trend=body_trend,
         weekly_coaching_notes=weekly_notes,
+        muscle_recovery_focus=focus,
+        avoid_muscles=avoid_text,
     )

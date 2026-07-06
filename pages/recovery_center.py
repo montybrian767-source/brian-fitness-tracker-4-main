@@ -67,7 +67,22 @@ def _latest_body_defaults(body_path: Path):
 
 
 def _latest_intensity_default(workout_log_path: Path):
-    log_cols = ["date", "day", "exercise", "set_number", "weight_lbs", "reps", "rpe", "pain", "notes", "volume"]
+    log_cols = [
+        "date",
+        "day",
+        "exercise",
+        "set_number",
+        "weight_lbs",
+        "reps",
+        "rpe",
+        "pain",
+        "pain_score",
+        "body_feedback_score",
+        "notes",
+        "pain_notes",
+        "body_feedback_notes",
+        "volume",
+    ]
     df = _safe_read(workout_log_path, log_cols)
     if df.empty:
         return "Normal"

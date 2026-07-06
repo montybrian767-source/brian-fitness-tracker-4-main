@@ -13,11 +13,13 @@ from components.hero_banner import hero_banner
 from components.mission_card import mission_card
 from components.stat_card import stat_card
 from components.workout_command_center import workout_command_center
+from components.muscle_heatmap import render_muscle_heatmap
 from components.exercise_photo import exercise_photo
 from components.body_composition_summary import body_composition_summary
 from engines.exercise_intelligence import ExerciseIntelligence
 from engines.body_intelligence import BodyIntelligence
 from engines.ai_coach_engine import build_daily_brief
+from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
 from pages.body_stats import render_body_stats_page
@@ -42,7 +44,7 @@ st.set_page_config(page_title="Brian Fitness Tracker X", page_icon="🏋️", la
 
 def ensure_log():
     if not LOG.exists():
-        pd.DataFrame(columns=['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','notes','volume']).to_csv(LOG,index=False)
+        pd.DataFrame(columns=['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','body_feedback_score','notes','body_feedback_notes','volume']).to_csv(LOG,index=False)
 ensure_log()
 
 def ensure_csv(path, columns):
@@ -166,8 +168,54 @@ def load_workouts():
 
 def load_log():
     ensure_log()
-    try: return pd.read_csv(LOG)
-    except Exception: return pd.DataFrame(columns=['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','notes','volume'])
+    try:
+        df = pd.read_csv(LOG)
+    except Exception:
+        return pd.DataFrame(columns=['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','body_feedback_score','notes','body_feedback_notes','volume'])
+
+    if 'body_feedback_score' not in df.columns:
+        if 'pain_score' in df.columns:
+            df['body_feedback_score'] = df['pain_score']
+        elif 'pain' in df.columns:
+            df['body_feedback_score'] = df['pain']
+        else:
+            df['body_feedback_score'] = 0
+    if 'body_feedback_notes' not in df.columns:
+        if 'pain_notes' in df.columns:
+            df['body_feedback_notes'] = df['pain_notes']
+        elif 'notes' in df.columns:
+            df['body_feedback_notes'] = df['notes']
+        else:
+            df['body_feedback_notes'] = ''
+    if 'pain' not in df.columns:
+        df['pain'] = df['body_feedback_score']
+    if 'notes' not in df.columns:
+        df['notes'] = df['body_feedback_notes']
+    return df
+
+
+def resolve_body_feedback_score(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if 'body_feedback_score' in df.columns:
+        return pd.to_numeric(df['body_feedback_score'], errors='coerce').fillna(0)
+    if 'pain_score' in df.columns:
+        return pd.to_numeric(df['pain_score'], errors='coerce').fillna(0)
+    if 'pain' in df.columns:
+        return pd.to_numeric(df['pain'], errors='coerce').fillna(0)
+    return pd.Series([0] * len(df), index=df.index, dtype=float)
+
+
+def resolve_body_feedback_notes(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    if 'body_feedback_notes' in df.columns:
+        return df['body_feedback_notes'].astype(str)
+    if 'pain_notes' in df.columns:
+        return df['pain_notes'].astype(str)
+    if 'notes' in df.columns:
+        return df['notes'].astype(str)
+    return pd.Series([''] * len(df), index=df.index, dtype=str)
 
 def save_log(rows):
     ensure_log()
@@ -486,13 +534,22 @@ if page == "Dashboard":
 
     body_df = read_csv_safe(BODY, ['date','body_weight_lbs','goal_weight_lbs','waist_in','body_fat_pct','muscle_mass_lbs','bmi','water_pct','protein_pct','bone_mass_lbs','bmr_cal','metabolic_age','visceral_fat','lean_body_mass_lbs','notes'])
 
+    recovery_df = read_csv_safe(RECOVERY, RECOVERY_COLUMNS)
+    supplements_df = read_csv_safe(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes'])
+
     coach_brief = build_daily_brief(
         workouts_df=workouts,
-        recovery_df=read_csv_safe(RECOVERY, RECOVERY_COLUMNS),
+        recovery_df=recovery_df,
         body_df=body_df,
         nutrition_df=nut,
-        supplements_df=read_csv_safe(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes']),
+        supplements_df=supplements_df,
         workout_log_df=log,
+    )
+
+    muscle_snapshot = build_muscle_readiness_snapshot(
+        workout_log_df=log,
+        recovery_df=recovery_df,
+        body_df=body_df,
     )
 
     st.markdown(
@@ -508,6 +565,25 @@ if page == "Dashboard":
         """,
         unsafe_allow_html=True,
     )
+
+    top_ready = muscle_snapshot.get("top_ready", []) or []
+    top_fatigued = muscle_snapshot.get("top_fatigued", []) or []
+    ready_text = " | ".join([f"{m['muscle'].title()} {m['readiness_percent']}%" for m in top_ready[:3]]) or "No strong ready signals yet."
+    fatigued_text = " | ".join([f"{m['muscle'].title()} {m['readiness_percent']}%" for m in top_fatigued[:3]]) or "No major fatigued muscles detected."
+    focus_text = str(muscle_snapshot.get("recommended_workout", "Moderate full-body technique session"))
+
+    st.markdown(
+        f"""
+        <div class="side-card" style="margin-top:10px;">
+                    <div class="side-title">Muscle Readiness</div>
+          <div class="small"><b>Top 3 Ready:</b> {ready_text}</div>
+          <div class="small" style="margin-top:8px;"><b>Top 3 Fatigued:</b> {fatigued_text}</div>
+                    <div class="small" style="margin-top:10px;"><b>Recommended Workout:</b> {focus_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_muscle_heatmap(muscle_snapshot, key_prefix="dashboard_readiness")
 
     smart_metrics = dashboard_body_metrics(body_df)
     d1, d2, d3, d4, d5 = st.columns(5)
@@ -643,7 +719,7 @@ elif page == "Today's Workout":
         )
         # Preserve existing logging behavior: when complete, save log and advance
         if result.get('complete'):
-            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':result.get('set_number',1),'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('pain',0),'notes':result.get('notes',''),'volume':result.get('volume',0)}])
+            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':result.get('set_number',1),'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
             st.success(f"Saved set {result.get('set_number',1)} for {row.exercise}. Rest, breathe, and move with control.")
             if st.session_state.x6_idx < len(active)-1:
                 st.session_state.x6_idx += 1
@@ -727,7 +803,7 @@ elif page == "Gym Mode":
             key_prefix="gym",
         )
         if result.get('complete'):
-            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':1,'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('pain',0),'notes':result.get('notes',''),'volume':result.get('volume',0)}])
+            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':1,'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
             st.success("Set saved. Start your rest timer.")
         st.markdown("### Rest Timer")
         t = st.selectbox("Timer", [45,60,75,90,120], index=1, key="gym_timer")
@@ -770,13 +846,14 @@ elif page == "AI Coach":
 
     st.markdown('## Training Guidance')
     st.markdown(f'<div class="side-card"><div class="side-title">Workout Intensity Recommendation</div><div class="small">{brief.workout_intensity_recommendation}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="side-card"><div class="side-title">Muscle Readiness Focus</div><div class="small"><b>Focus:</b> {brief.muscle_recovery_focus}</div><div class="small" style="margin-top:8px;"><b>Avoid:</b> {brief.avoid_muscles}</div></div>', unsafe_allow_html=True)
 
     st.markdown('## Nutrition Guidance')
     st.markdown(f'<div class="side-card"><div class="side-title">Nutrition Recommendation</div><div class="small">{brief.nutrition_recommendation}</div></div>', unsafe_allow_html=True)
 
     st.markdown('## Recovery Guidance')
-    recovery_guidance = brief.recovery_warning if brief.recovery_warning else 'No recovery warning. Continue with planned recovery fundamentals.'
-    st.markdown(f'<div class="side-card"><div class="side-title">Recovery Warning / Guidance</div><div class="small">{recovery_guidance}</div></div>', unsafe_allow_html=True)
+    recovery_guidance = brief.recovery_warning if brief.recovery_warning else 'No readiness note. Continue with planned recovery fundamentals.'
+    st.markdown(f'<div class="side-card"><div class="side-title">Readiness Note</div><div class="small">{recovery_guidance}</div></div>', unsafe_allow_html=True)
 
     st.markdown('## Body Intelligence Insight')
     st.markdown(f'<div class="side-card"><div class="side-title">Body Composition Insight</div><div class="small">{brief.body_composition_insight}</div></div>', unsafe_allow_html=True)
@@ -789,13 +866,66 @@ elif page == "Workout Builder":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout Builder</div><div class="sub">Add exercises to your weekly plan without editing CSV files.</div></div>', unsafe_allow_html=True)
     st.info("Use this page to add a new exercise to the weekly schedule. It updates data/workouts.csv.")
     library = workouts.copy()
+    readiness_snapshot = build_muscle_readiness_snapshot(
+        workout_log_df=load_log(),
+        recovery_df=read_csv_safe(RECOVERY, RECOVERY_COLUMNS),
+        body_df=read_csv_safe(BODY, BODY_COLUMNS),
+    )
+
+    muscle_readiness = {
+        str(item.get('muscle', '')): item
+        for item in (readiness_snapshot.get('rows').to_dict('records') if readiness_snapshot.get('rows') is not None and not readiness_snapshot.get('rows').empty else [])
+    }
+
+    def _group_status(group_name: str) -> str:
+        text = str(group_name or '').lower().replace('+', ' ')
+        statuses = []
+        for token in text.split():
+            canonical = normalize_muscle_name(token)
+            if canonical and canonical in muscle_readiness:
+                statuses.append(str(muscle_readiness[canonical].get('status', 'Yellow')))
+        if 'Red' in statuses:
+            return 'Red'
+        if 'Orange' in statuses:
+            return 'Orange'
+        if 'Yellow' in statuses:
+            return 'Yellow'
+        if 'Green' in statuses:
+            return 'Green'
+        return 'Yellow'
+
+    st.markdown('### Muscle Readiness Recommendations')
+    top_ready_builder = readiness_snapshot.get('top_ready', []) or []
+    top_fatigued_builder = readiness_snapshot.get('top_fatigued', []) or []
+    st.markdown(
+        f'<div class="side-card"><div class="side-title">Workout Builder Readiness</div>'
+        f'<div class="small"><b>Prefer:</b> {", ".join([m["muscle"].title() for m in top_ready_builder[:3]]) or "No clear green muscles yet"}</div>'
+        f'<div class="small" style="margin-top:8px;"><b>Avoid (Red):</b> {", ".join([m["muscle"].title() for m in top_fatigued_builder if m.get("status") == "Red"]) or "None"}</div>'
+        f'<div class="small" style="margin-top:8px;"><b>Recommended Workout:</b> {readiness_snapshot.get("recommended_workout", "Moderate full-body technique session")}</div></div>',
+        unsafe_allow_html=True,
+    )
+
     search = st.text_input("Search current exercise library", placeholder="lat pulldown, chest press, row...")
     if search:
         shown = library[library['exercise'].astype(str).str.contains(search, case=False, na=False)]
     else:
         shown = library
+
+    if not shown.empty:
+        shown = shown.copy()
+        shown['readiness_status'] = shown['muscle_group'].apply(_group_status)
+        shown['readiness_hint'] = shown['readiness_status'].map({
+            'Green': 'Preferred',
+            'Yellow': 'Moderate',
+            'Orange': 'Use Caution',
+            'Red': 'Avoid Today',
+        }).fillna('Moderate')
+
+        # Do not remove rows automatically; only sort to prefer Green and push Red lower.
+        shown['readiness_rank'] = shown['readiness_status'].map({'Green': 0, 'Yellow': 1, 'Orange': 2, 'Red': 3}).fillna(1)
+        shown = shown.sort_values(['readiness_rank', 'day', 'exercise']).drop(columns=['readiness_rank'])
     st.markdown("### Current Plan Table")
-    st.dataframe(shown[['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file']], use_container_width=True)
+    st.dataframe(shown[['day','muscle_group','exercise','readiness_hint','target_sets','target_reps','base_weight','image_file']], use_container_width=True)
 
     st.markdown("### Add Exercise to Plan")
     c1,c2,c3 = st.columns(3)
@@ -1059,7 +1189,7 @@ elif page == "Progress Analytics":
 
     # Normalize numeric fields safely
     if not log.empty:
-        for col in ['weight_lbs','reps','volume','rpe','pain']:
+        for col in ['weight_lbs','reps','volume','rpe','pain','pain_score','body_feedback_score']:
             if col in log.columns:
                 log[col] = pd.to_numeric(log[col], errors='coerce').fillna(0)
         log['date'] = log['date'].astype(str)
@@ -1077,15 +1207,16 @@ elif page == "Progress Analytics":
     total_sessions = log['date'].nunique() if not log.empty and 'date' in log.columns else 0
     total_volume = int(log['volume'].sum()) if not log.empty and 'volume' in log.columns else 0
     avg_rpe = float(log['rpe'].mean()) if not log.empty and 'rpe' in log.columns else 0
-    avg_pain = float(log['pain'].mean()) if not log.empty and 'pain' in log.columns else 0
+    body_feedback_series = resolve_body_feedback_score(log)
+    avg_body_feedback = float(body_feedback_series.mean()) if not body_feedback_series.empty else 0.0
     pr_count = log.groupby('exercise')['weight_lbs'].max().shape[0] if not log.empty and 'exercise' in log.columns else 0
-    comeback_score = min(100, int((total_sessions * 5) + (min(total_volume, 50000) / 1000) + (pr_count * 2) - (avg_pain * 3))) if total_sessions else 0
+    comeback_score = min(100, int((total_sessions * 5) + (min(total_volume, 50000) / 1000) + (pr_count * 2) - (avg_body_feedback * 3))) if total_sessions else 0
 
     m1,m2,m3,m4 = st.columns(4)
     m1.markdown(f'<div class="metric-card"><div class="metric-label">Comeback Score</div><div class="metric-value">{comeback_score}/100</div></div>', unsafe_allow_html=True)
     m2.markdown(f'<div class="metric-card"><div class="metric-label">Workout Sessions</div><div class="metric-value">{total_sessions}</div></div>', unsafe_allow_html=True)
     m3.markdown(f'<div class="metric-card"><div class="metric-label">Total Volume</div><div class="metric-value">{total_volume:,} lbs</div></div>', unsafe_allow_html=True)
-    m4.markdown(f'<div class="metric-card"><div class="metric-label">Avg Knee Pain</div><div class="metric-value">{avg_pain:.1f}/10</div></div>', unsafe_allow_html=True)
+    m4.markdown(f'<div class="metric-card"><div class="metric-label">Avg Body Check-In</div><div class="metric-value">{avg_body_feedback:.1f}/10</div></div>', unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4 = st.tabs(['Strength', 'Body', 'Nutrition', 'Supplements'])
     with tab1:
@@ -1105,7 +1236,7 @@ elif page == "Progress Analytics":
                 top = log.groupby('exercise', as_index=False)['volume'].sum().sort_values('volume', ascending=False).head(15)
                 st.bar_chart(top.set_index('exercise')['volume'])
             st.markdown('### Coach Notes')
-            st.markdown('<div class="side-card"><div class="side-title">Smart Progress Read</div><div class="small">If you complete all target reps with pain under 3/10 and RPE under 8, increase next week by 5 lb for upper-body machines or 2.5 lb for cable movements.</div></div>', unsafe_allow_html=True)
+            st.markdown('<div class="side-card"><div class="side-title">Smart Progress Read</div><div class="small">If you complete all target reps with body feedback under 3/10 and RPE under 8, increase next week by 5 lb for upper-body machines or 2.5 lb for cable movements.</div></div>', unsafe_allow_html=True)
     with tab2:
         if body.empty:
             st.info('No body stats yet. Use Body Stats page to start tracking weight and waist.')
@@ -1157,7 +1288,15 @@ elif page == "History":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
     log=load_log()
     if log.empty: st.info('No workouts saved yet.')
-    else: st.dataframe(log.tail(200), use_container_width=True)
+    else:
+        display_log = log.copy()
+        display_log['body_feedback_score'] = resolve_body_feedback_score(display_log)
+        display_log['body_feedback_notes'] = resolve_body_feedback_notes(display_log)
+        preferred_cols = [
+            'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume'
+        ]
+        cols = [c for c in preferred_cols if c in display_log.columns]
+        st.dataframe(display_log.tail(200)[cols], use_container_width=True)
 
 elif page == "Data Manager":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)

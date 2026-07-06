@@ -7,6 +7,7 @@ import streamlit as st
 
 from components.exercise_detail_panel import render_exercise_detail_panel
 from engines.exercise_intelligence import ExerciseIntelligence
+from engines.muscle_readiness_engine import build_muscle_readiness_snapshot
 
 
 _PAGE_CSS = """
@@ -26,6 +27,19 @@ _PAGE_CSS = """
 }
 </style>
 """
+
+
+_APP_DIR = Path(__file__).resolve().parent.parent
+_DATA_DIR = _APP_DIR / "data"
+
+
+def _safe_read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
 
 
 def _filtered_library(library_df: pd.DataFrame, search: str, muscle_filter: str, equipment_filter: str, difficulty_filter: str) -> pd.DataFrame:
@@ -94,4 +108,9 @@ def render_exercise_library_page(assets_dir: Path):
     st.markdown('</div>', unsafe_allow_html=True)
 
     profile = intel.get_profile(st.session_state.exercise_library_selected)
-    render_exercise_detail_panel(profile, assets_dir)
+    muscle_snapshot = build_muscle_readiness_snapshot(
+        workout_log_df=_safe_read_csv(_DATA_DIR / "workout_log.csv"),
+        recovery_df=_safe_read_csv(_DATA_DIR / "recovery_log.csv"),
+        body_df=_safe_read_csv(_DATA_DIR / "body_stats.csv"),
+    )
+    render_exercise_detail_panel(profile, assets_dir, muscle_snapshot)

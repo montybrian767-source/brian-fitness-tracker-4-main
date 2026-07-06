@@ -53,9 +53,9 @@ def workout_command_center(
     with col3:
         rpe = st.number_input("RPE", min_value=0.0, max_value=10.0, value=7.0, step=0.5, key=f"{key_prefix}_rpe_{idx}")
 
-    pain = st.slider("Pain check", 0, 10, 0, key=f"{key_prefix}_pain_{idx}")
+    body_feedback_score = st.slider("Body Check-In", 0, 10, 0, key=f"{key_prefix}_body_feedback_{idx}")
     set_number = st.number_input("Set number", min_value=1, max_value=max(int(sets or 8), 8), value=1, step=1, key=f"{key_prefix}_set_{idx}")
-    notes = st.text_input("Quick notes", value="", placeholder="Form, difficulty, pain, equipment notes...", key=f"{key_prefix}_notes_{idx}")
+    body_feedback_notes = st.text_input("Quick notes", value="", placeholder="Form, difficulty, body check-in, equipment notes...", key=f"{key_prefix}_notes_{idx}")
 
     vol = int(weight * reps)
     st.markdown(f'<div style="background:#07111f;border-radius:12px;padding:12px;margin-bottom:12px;"><div style="color:#93c5fd;font-size:.85rem;">Current Set Volume</div><div style="font-size:1.8rem;font-weight:900;color:#22c55e;">{vol:,} lbs</div></div>', unsafe_allow_html=True)
@@ -87,9 +87,11 @@ def workout_command_center(
         'weight': weight,
         'reps': reps,
         'rpe': rpe,
-        'pain': pain,
+        'pain': body_feedback_score,
+        'body_feedback_score': body_feedback_score,
         'set_number': set_number,
-        'notes': notes,
+        'notes': body_feedback_notes,
+        'body_feedback_notes': body_feedback_notes,
         'volume': vol,
         'prev': prev_clicked,
         'next': next_clicked,

@@ -9,6 +9,7 @@ import streamlit as st
 from components.exercise_image_gallery import render_exercise_image_gallery
 from components.exercise_progression_panel import render_exercise_progression_panel
 from components.muscle_focus_panel import render_muscle_focus_panel
+from engines.muscle_readiness_engine import get_readiness_for_muscle_list
 
 
 _DETAIL_CSS = """
@@ -39,6 +40,11 @@ _DETAIL_CSS = """
 .titan-copy-list li {margin-bottom:8px;}
 .titan-variation-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}
 .titan-variation {border:1px solid rgba(148,163,184,.16);border-radius:16px;padding:12px;background:linear-gradient(180deg,rgba(9,21,36,.96),rgba(6,14,24,.94));color:#eef4ff;font-size:.88rem;font-weight:800;min-height:88px;display:flex;align-items:flex-end;}
+.titan-recovery-card {margin-top:14px;border:1px solid rgba(34,197,94,.2);border-radius:18px;padding:14px;background:linear-gradient(180deg,rgba(9,25,20,.72),rgba(7,17,31,.95));}
+.titan-recovery-title {font-family:"Space Grotesk","Sora","Avenir Next","Segoe UI",sans-serif;font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;color:#86efac;font-weight:900;margin-bottom:10px;}
+.titan-recovery-row {display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.titan-recovery-pill {font-family:"Manrope","Avenir Next","Segoe UI",sans-serif;padding:6px 10px;border-radius:999px;border:1px solid rgba(148,163,184,.2);font-size:.79rem;font-weight:850;color:#e8eef9;background:rgba(11,24,40,.7);line-height:1.3;}
+.titan-recovery-warning {font-family:"Manrope","Avenir Next","Segoe UI",sans-serif;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid rgba(239,68,68,.45);background:rgba(127,29,29,.35);color:#fecaca;font-size:.86rem;font-weight:700;line-height:1.45;}
 @media (max-width: 900px) {
     .titan-meta-grid,.titan-card-grid,.titan-variation-grid {grid-template-columns:1fr;}
   .titan-title-row {flex-direction:column;}
@@ -67,7 +73,63 @@ def _difficulty_stars(difficulty: str) -> str:
     return stars
 
 
-def render_exercise_detail_panel(exercise_data: Dict, assets_dir: Path) -> None:
+def _recovery_color(status: str) -> str:
+    s = str(status or "").lower()
+    if s in {"green", "ready"}:
+        return "#22c55e"
+    if s in {"yellow", "moderate"}:
+        return "#f59e0b"
+    if s in {"orange", "recovering"}:
+        return "#f97316"
+    if s in {"red", "fatigued", "recover"}:
+        return "#ef4444"
+    return "#94a3b8"
+
+
+def _recovery_markup(exercise_data: Dict, muscle_snapshot: Dict) -> str:
+    primary = get_readiness_for_muscle_list(muscle_snapshot, exercise_data.get("primary_muscles", []) or [])
+    secondary = get_readiness_for_muscle_list(muscle_snapshot, exercise_data.get("secondary_muscles", []) or [])
+    stabilizers = get_readiness_for_muscle_list(muscle_snapshot, exercise_data.get("stabilizers", []) or [])
+
+    if not primary and not secondary and not stabilizers:
+        return (
+            '<div class="titan-recovery-card">'
+            '<div class="titan-recovery-title">Muscle Readiness Overlay</div>'
+            '<div class="titan-recovery-row"><span class="titan-recovery-pill">Recovery guidance will appear after workout and recovery logs are available.</span></div>'
+            '</div>'
+        )
+
+    def _row(items, label):
+        if not items:
+            return f'<div class="titan-recovery-row"><span class="titan-recovery-pill">{label}: No mapped muscles</span></div>'
+        pills = []
+        for item in items:
+            status = str(item.get("status", "Unknown"))
+            pct = int(item.get("readiness_percent", 0) or 0)
+            status_label = str(item.get("status_label", status))
+            weekly_volume = int(item.get("weekly_volume", 0) or 0)
+            color = _recovery_color(status)
+            pills.append(f'<span class="titan-recovery-pill" style="border-color:{color};">{html.escape(str(item.get("muscle", "muscle")).title())}: {pct}% • {html.escape(status_label)} • {weekly_volume:,} lbs/wk</span>')
+        return f'<div class="titan-recovery-row"><span class="titan-recovery-pill">{label}</span>{"".join(pills)}</div>'
+
+    warning_targets = [item for item in primary if str(item.get("status", "")) in {"Orange", "Red"}]
+    warning = ""
+    if warning_targets:
+        names = ", ".join(str(item.get("muscle", "")).title() for item in warning_targets[:3])
+        warning = f'<div class="titan-recovery-warning">Warning: primary target muscles are not ready ({html.escape(names)}). Reduce load or choose a different focus.</div>'
+
+    return (
+        '<div class="titan-recovery-card">'
+        '<div class="titan-recovery-title">Muscle Readiness Overlay</div>'
+        f'{_row(primary, "Primary")}'
+        f'{_row(secondary, "Secondary")}'
+        f'{_row(stabilizers, "Stabilizers")}'
+        f'{warning}'
+        '</div>'
+    )
+
+
+def render_exercise_detail_panel(exercise_data: Dict, assets_dir: Path, muscle_snapshot: Dict | None = None) -> None:
     st.markdown(_DETAIL_CSS, unsafe_allow_html=True)
 
     tags = exercise_data.get("tags", []) or []
@@ -108,6 +170,7 @@ def render_exercise_detail_panel(exercise_data: Dict, assets_dir: Path) -> None:
     left, right = st.columns([1.75, 1.0], gap="large")
     with left:
         st.markdown(header_html, unsafe_allow_html=True)
+        st.markdown(_recovery_markup(exercise_data, muscle_snapshot or {}), unsafe_allow_html=True)
         render_exercise_image_gallery(exercise_data, assets_dir)
         st.markdown(
             '<div class="titan-card-grid">'
