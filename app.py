@@ -1,6 +1,6 @@
 
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 import base64
 import pandas as pd
 import streamlit as st
@@ -22,6 +22,12 @@ from engines.ai_coach_engine import build_daily_brief
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
+from engines.cloud_database import (
+    fetch_cloud_row_count,
+    insert_workout_rows,
+    is_cloud_configured,
+    sync_local_csv_to_cloud,
+)
 from pages.body_stats import render_body_stats_page
 from pages.recovery_center import render_recovery_center
 from pages.smart_scale_import import render_smart_scale_import_page
@@ -194,6 +200,25 @@ def load_log():
     return df
 
 
+def get_supabase_credentials():
+    try:
+        supabase_url = str(st.secrets.get('SUPABASE_URL', '')).strip()
+        supabase_key = str(st.secrets.get('SUPABASE_KEY', '')).strip()
+    except Exception:
+        supabase_url, supabase_key = '', ''
+    return supabase_url, supabase_key
+
+
+def update_cloud_sync_state(ok: bool, message: str, inserted: int = 0, error: str = ''):
+    st.session_state['cloud_sync_status'] = {
+        'ok': bool(ok),
+        'message': str(message),
+        'inserted': int(inserted),
+        'error': str(error or ''),
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+
 def resolve_body_feedback_score(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=float)
@@ -222,6 +247,15 @@ def save_log(rows):
     old = load_log()
     new = pd.DataFrame(rows)
     pd.concat([old,new], ignore_index=True).to_csv(LOG,index=False)
+
+    supabase_url, supabase_key = get_supabase_credentials()
+    cloud_result = insert_workout_rows(rows, supabase_url, supabase_key)
+    update_cloud_sync_state(
+        ok=cloud_result.ok,
+        message=cloud_result.message,
+        inserted=cloud_result.inserted,
+        error=cloud_result.error,
+    )
 
 def image_path(row):
     f = str(row.get('image_file','')).strip()
@@ -1318,6 +1352,59 @@ elif page == "Data Manager":
                     st.warning(
                         f"Data warning: manual rows are newer ({latest_manual.strftime('%Y-%m-%d')}) than latest smart-scale rows ({latest_scale.strftime('%Y-%m-%d')}). Dashboard latest weight may prefer smart-scale data when available."
                     )
+
+    st.markdown('### Cloud Database')
+    local_rows = len(load_log())
+    supabase_url, supabase_key = get_supabase_credentials()
+    cloud_enabled = is_cloud_configured(supabase_url, supabase_key)
+    cloud_rows = None
+    cloud_error = None
+
+    if cloud_enabled:
+        cloud_rows, cloud_error = fetch_cloud_row_count(supabase_url, supabase_key)
+
+    if not cloud_enabled:
+        status_label = 'Not Configured'
+        st.info('Cloud sync is optional. Add SUPABASE_URL and SUPABASE_KEY in Streamlit secrets to enable permanent cloud sync. Local CSV backups continue to work normally.')
+    elif cloud_error:
+        status_label = 'Connection Error'
+        st.warning('Supabase is configured, but cloud status could not be loaded right now. Local CSV backups are still active.')
+    else:
+        status_label = 'Connected'
+        st.success('Cloud database is connected and available.')
+
+    last_sync = st.session_state.get('cloud_sync_status', {})
+    last_sync_time = str(last_sync.get('timestamp', 'No sync attempts this session'))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Cloud Database Status', status_label)
+    c2.metric('Last Sync', last_sync_time)
+    c3.metric('Local Rows', str(local_rows))
+    c4.metric('Cloud Rows', str(cloud_rows) if cloud_rows is not None else 'N/A')
+
+    if last_sync:
+        if last_sync.get('ok'):
+            st.caption(f"Last sync result: {last_sync.get('message', '')}")
+        else:
+            st.caption(f"Last sync result: {last_sync.get('message', '')}")
+
+    sync_button_disabled = not cloud_enabled
+    if st.button('Sync local CSV to cloud', use_container_width=True, disabled=sync_button_disabled):
+        sync_result = sync_local_csv_to_cloud(LOG, supabase_url, supabase_key)
+        update_cloud_sync_state(
+            ok=sync_result.ok,
+            message=sync_result.message,
+            inserted=sync_result.inserted,
+            error=sync_result.error,
+        )
+        if sync_result.ok:
+            st.success(sync_result.message)
+        else:
+            st.warning(sync_result.message)
+
+        cloud_rows_after, cloud_error_after = fetch_cloud_row_count(supabase_url, supabase_key)
+        if cloud_error_after is None and cloud_rows_after is not None:
+            st.caption(f"Cloud rows after sync: {cloud_rows_after}")
 
     if LOG.exists():
         st.download_button('Export workout_log.csv', LOG.read_bytes(), file_name='workout_log.csv')
