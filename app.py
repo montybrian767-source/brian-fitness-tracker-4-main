@@ -28,6 +28,13 @@ from engines.cloud_database import (
     is_cloud_configured,
     sync_local_csv_to_cloud,
 )
+from engines.performance_intelligence import (
+    build_pr_summary,
+    compute_workout_grade,
+    performance_scores,
+    recovery_recommendation,
+    workout_streak_days,
+)
 from pages.body_stats import render_body_stats_page
 from pages.recovery_center import render_recovery_center
 from pages.smart_scale_import import render_smart_scale_import_page
@@ -84,6 +91,8 @@ def ensure_csv(path, columns):
             df.to_csv(path, index=False)
 
 def ensure_health_logs():
+    ensure_csv(WORKOUTS, ['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file'])
+    ensure_csv(MAP, ['exercise', 'image_file'])
     ensure_csv(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
     ensure_csv(BODY, BODY_COLUMNS)
     ensure_csv(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes'])
@@ -166,9 +175,7 @@ def repair_workout_database(df):
     return df[required]
 
 def load_workouts():
-    if not WORKOUTS.exists():
-        st.error("Missing data/workouts.csv")
-        return pd.DataFrame(columns=['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file'])
+    ensure_csv(WORKOUTS, ['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file'])
     df = pd.read_csv(WORKOUTS)
     return repair_workout_database(df)
 
@@ -292,9 +299,11 @@ section[data-testid="stSidebar"] * {color:#f8fafc !important;}
 .kicker {letter-spacing:.25em; font-size:.82rem; color:#22c55e; font-weight:900; text-transform:uppercase;}
 .title {font-size:2.1rem; font-weight:900; line-height:1.1; margin-top:8px;}
 .sub {color:#9cc7ff; margin-top:10px;}
-.metric-card {background:#0f1f34; border:1px solid #254264; border-radius:18px; padding:18px; min-height:95px;}
-.metric-label {color:#9cc7ff; font-size:.85rem;}
-.metric-value {font-size:1.7rem; font-weight:900; color:white;}
+.metric-card {background:#0f1f34; border:1px solid #254264; border-radius:18px; padding:16px; min-height:118px; display:flex; flex-direction:column; justify-content:space-between;}
+.metric-label {color:#9cc7ff; font-size:.82rem; line-height:1.2;}
+.metric-value {font-size:1.35rem; font-weight:900; color:white; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; word-break:keep-all; overflow-wrap:normal;}
+.metric-value-wrap {font-size:1.1rem; font-weight:900; color:white; line-height:1.2; white-space:normal;}
+.metric-subvalue {font-size:1rem; font-weight:850; color:#dbeafe; line-height:1.2; margin-top:4px; white-space:nowrap;}
 .exercise-card {background:linear-gradient(135deg,#0f1f34,#0a1728); border:1px solid #254264; border-radius:22px; padding:18px; margin:18px 0; box-shadow: 0 8px 28px rgba(0,0,0,.2);}
 .exercise-head {display:flex; align-items:center; gap:12px; margin-bottom:12px;}
 .num {background:#1d7cff; color:#fff; border-radius:999px; width:34px; height:34px; display:flex; align-items:center; justify-content:center; font-weight:900;}
@@ -467,6 +476,25 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 .x-week.today {border-color:#22C55E; box-shadow:0 0 28px rgba(34,197,94,.18);}
 .x-week-day {font-size:1.1rem; font-weight:950; color:white;}
 .x-week-badge {display:inline-block; margin:12px 0 8px; color:#93C5FD; border:1px solid #2563EB; border-radius:999px; padding:7px 10px; font-size:.78rem; font-weight:900;}
+.dashboard-tight .x-hero{margin:10px 0 14px 0; padding:26px 28px;}
+.dashboard-tight .side-card{margin-bottom:10px;}
+.dashboard-title{font-size:1.1rem; font-weight:900; color:#dbeafe; margin:8px 0 10px 0; letter-spacing:.04em;}
+.matrix-grid{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:10px 0 8px 0;}
+.matrix-card{background:linear-gradient(145deg,#101d31,#0b1627); border:1px solid #294665; border-radius:16px; padding:14px; box-shadow:0 10px 24px rgba(0,0,0,.24);}
+.matrix-top{display:flex; justify-content:space-between; align-items:center; gap:8px;}
+.matrix-name{font-size:1rem; font-weight:900; color:#f8fafc;}
+.matrix-badge{display:inline-block; padding:4px 9px; border-radius:999px; font-size:.7rem; font-weight:900; letter-spacing:.06em; text-transform:uppercase; border:1px solid transparent;}
+.matrix-ready{color:#bbf7d0; background:rgba(34,197,94,.16); border-color:rgba(34,197,94,.55);}
+.matrix-moderate{color:#fef08a; background:rgba(250,204,21,.16); border-color:rgba(250,204,21,.55);}
+.matrix-recovering{color:#fdba74; background:rgba(249,115,22,.16); border-color:rgba(249,115,22,.55);}
+.matrix-fatigued{color:#fca5a5; background:rgba(239,68,68,.14); border-color:rgba(239,68,68,.55);}
+.matrix-meta{color:#b8c2d1; font-size:.8rem; margin-top:6px;}
+.matrix-pct{font-size:1.35rem; font-weight:900; color:#fff; margin-top:8px;}
+.matrix-action{font-size:.78rem; color:#dbeafe; margin-top:8px; min-height:34px;}
+.matrix-bar{height:8px; background:#12243a; border:1px solid #243a55; border-radius:999px; overflow:hidden; margin-top:8px;}
+.matrix-fill{height:100%; border-radius:999px; background:linear-gradient(90deg,#2563eb,#22c55e);}
+@media(max-width:1100px){.matrix-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:760px){.matrix-grid{grid-template-columns:1fr;}.dashboard-tight .x-hero{padding:20px 18px;}}
 @media(max-width: 850px){.x-hero{padding:28px 22px}.x-title{font-size:2.2rem}.x-recovery{position:relative; right:auto; top:auto; text-align:left; margin-top:24px}.x-recovery .big{font-size:3rem}.x-mission{grid-template-columns:1fr}.x-ai{grid-template-columns:1fr}.x-ai-mini{border-left:none; padding-left:0; border-top:1px solid rgba(255,255,255,.12); padding-top:14px}}
 
 
@@ -488,8 +516,8 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Dashboard","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 3.3")
-st.sidebar.caption("X.6 Elite Workout Experience")
+st.sidebar.markdown("## 🏋️ Brian Fit 5.0")
+st.sidebar.caption("X.7 Performance Intelligence Engine")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Workout history saves to</span><br><b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 st.markdown('<div class="mobile-nav-title">📱 Quick Navigation</div>', unsafe_allow_html=True)
@@ -502,72 +530,10 @@ days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 if page == "Dashboard":
     today = date.today().strftime('%A')
     today_df = workouts[workouts.day == today]
-    focus = "Chest + Triceps"
-    total_sessions = log['date'].nunique() if not log.empty and 'date' in log else 0
-    total_volume = int(pd.to_numeric(log.get('volume', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not log.empty else 0
-    installed = len(list(ASSETS.glob('*.png'))) + len(list(ASSETS.glob('*.jpg')))
+    focus = " / ".join(today_df['muscle_group'].astype(str).dropna().unique().tolist()) if not today_df.empty else "Recovery / Mobility"
+
     nut = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
-    today_s = str(date.today())
-    nt = nut[nut['date'].astype(str) == today_s] if not nut.empty else nut
-    cal_today = int(pd.to_numeric(nt.get('calories', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not nt.empty else 0
-    protein_today = int(pd.to_numeric(nt.get('protein_g', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not nt.empty else 0
-    water_today = int(pd.to_numeric(nt.get('water_oz', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not nt.empty else 0
-    protein_pct = min(100, int((protein_today / 160) * 100)) if protein_today else 0
-    water_pct = min(100, int((water_today / 100) * 100)) if water_today else 0
-    calorie_pct = min(100, int((cal_today / 2800) * 100)) if cal_today else 0
-    recovery_score = 92
-    status = "Excellent" if recovery_score >= 85 else "Good"
-    ai_weight_tip = "+5 lb" if total_sessions > 0 else "Build consistency"
-
-    st.markdown(textwrap.dedent("""
-    <div class="x-hero">
-      <div class="x-kicker">PROJECT TITAN</div>
-    <div class="x-title" style="font-size:2.4rem;font-weight:900;">Good Morning Brian</div>
-    <div class="x-sub">Recovery 92% • Today's Focus: Chest + Triceps</div>
-    </div>
-    """), unsafe_allow_html=True)
-
-    mission_card(
-        workout=focus,
-        recovery=f"{recovery_score}%",
-        readiness="Ready To Train",
-        time="58 min",
-        description="Lead with clarity, execute each set with control, and finish the session feeling sharper than when you started.",
-    )
-
-    st.markdown(textwrap.dedent(f"""
-    <div class="hero">
-      <div class="kicker">PROJECT TITAN</div>
-    <div class="title">Good Morning Brian</div>
-    <div class="sub">Recovery 92% • Today's Focus: Chest + Triceps</div>
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:10px;">
-        <div><b>Today:</b> {today}<br><b>Focus:</b> {focus}</div>
-        <div><b>Recovery:</b> {recovery_score}%<br><b>Readiness:</b> {status}<br><b>Duration:</b> 60 min</div>
-      </div>
-    </div>
-    """), unsafe_allow_html=True)
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    cards = [
-        (c1, "🔥", "Calories", f"{cal_today:,}", "/ 2,800 kcal", calorie_pct, "#A855F7", "Energy balance"),
-        (c2, "💪", "Protein", f"{protein_today}g", "/ 160g", protein_pct, "#22C55E", "Daily target"),
-        (c3, "💧", "Water", f"{water_today} oz", "/ 100 oz", water_pct, "#3B82F6", "Hydration"),
-        (c4, "⚡", "Streak", f"{total_sessions}", "sessions", min(100,total_sessions*10), "#F59E0B", "Consistency"),
-        (c5, "🏋️", "Volume", f"{total_volume:,}", "lbs lifted", 70 if total_volume else 0, "#8B5CF6", "Lifted today"),
-    ]
-    for col, icon, label, value, sub, pct, color, subtitle in cards:
-        with col:
-            stat_card(label, value, color, icon, subtitle)
-
-    ai_card(
-        message="Recovery is excellent. Increase Incline Press by 5 lbs. Hydration is below target.",
-        recommendation="Protein intake was 25g below goal yesterday. Estimated workout time: 61 minutes. Body weight is stable. Muscle mass increased 0.4 lb this week.",
-        protein_status="25g Below Goal Yesterday",
-        hydration_status="Below Target",
-    )
-
     body_df = read_csv_safe(BODY, ['date','body_weight_lbs','goal_weight_lbs','waist_in','body_fat_pct','muscle_mass_lbs','bmi','water_pct','protein_pct','bone_mass_lbs','bmr_cal','metabolic_age','visceral_fat','lean_body_mass_lbs','notes'])
-
     recovery_df = read_csv_safe(RECOVERY, RECOVERY_COLUMNS)
     supplements_df = read_csv_safe(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes'])
 
@@ -586,38 +552,201 @@ if page == "Dashboard":
         body_df=body_df,
     )
 
+    recovery_latest = get_latest_recovery(RECOVERY)
+    if recovery_latest:
+        recovery_score = int(pd.to_numeric(pd.Series([recovery_latest.get('recovery_pct', 72)]), errors='coerce').fillna(72).iloc[0])
+    else:
+        recovery_score = 72
+
+    log_view = log.copy()
+    if not log_view.empty and 'date' in log_view.columns:
+        log_view['date'] = pd.to_datetime(log_view['date'], errors='coerce')
+        log_view = log_view.dropna(subset=['date'])
+
+    streak = workout_streak_days(log)
+    sessions_7 = 0 if log_view.empty else int(log_view[log_view['date'] >= (pd.Timestamp(date.today()) - pd.Timedelta(days=6))]['date'].dt.date.nunique())
+    weekly_progress_pct = min(100, int((sessions_7 / 5.0) * 100))
+
+    if log_view.empty:
+        last_workout_text = 'No workouts logged yet.'
+    else:
+        latest_date = log_view['date'].max()
+        latest_rows = log_view[log_view['date'] == latest_date]
+        last_workout_text = f"{latest_date.date()} • {len(latest_rows)} sets • {latest_rows['exercise'].nunique()} exercises"
+
+    perf_scores = performance_scores(log)
+    pr_summary = build_pr_summary(log)
+    workout_grade = compute_workout_grade(log)
+
+    muscles = muscle_snapshot.get('muscles', {})
+
+    def _muscle_pct(name: str) -> float:
+        item = muscles.get(name, {})
+        return float(item.get('readiness_percent', 65) or 65)
+
+    legs_pct = (_muscle_pct('quads') + _muscle_pct('hamstrings') + _muscle_pct('glutes') + _muscle_pct('calves')) / 4.0
+    core_pct = _muscle_pct('core')
+    key_groups = {
+        'Chest': _muscle_pct('chest'),
+        'Back': _muscle_pct('back'),
+        'Shoulders': _muscle_pct('shoulders'),
+        'Biceps': _muscle_pct('biceps'),
+        'Triceps': _muscle_pct('triceps'),
+        'Legs': legs_pct,
+        'Core': core_pct,
+    }
+
+    def _status_from_pct(pct: float) -> str:
+        if pct >= 78:
+            return 'Green'
+        if pct >= 60:
+            return 'Yellow'
+        if pct >= 42:
+            return 'Orange'
+        return 'Red'
+
+    def _badge_class(status: str) -> str:
+        return {
+            'Green': 'matrix-ready',
+            'Yellow': 'matrix-moderate',
+            'Orange': 'matrix-recovering',
+            'Red': 'matrix-fatigued',
+        }.get(status, 'matrix-moderate')
+
+    def _status_label(status: str) -> str:
+        return {
+            'Green': 'Ready',
+            'Yellow': 'Moderate',
+            'Orange': 'Recovering',
+            'Red': 'Fatigued',
+        }.get(status, 'Moderate')
+
+    def _latest_date_text(items: list) -> str:
+        dates = []
+        for item in items:
+            dt = str((item or {}).get('last_trained', '')).strip()
+            if dt and dt.lower() not in {'none', 'nan'}:
+                dates.append(dt)
+        return max(dates) if dates else 'Not logged'
+
+    def _suggested_action(items: list) -> str:
+        priority = {'Red': 4, 'Orange': 3, 'Yellow': 2, 'Green': 1}
+        ranked = sorted(items, key=lambda x: priority.get(str((x or {}).get('status', 'Yellow')), 2), reverse=True)
+        if ranked:
+            return str(ranked[0].get('recommended_action', 'Train with controlled intensity.'))
+        return 'Train with controlled intensity.'
+
+    readiness_status = 'Ready' if recovery_score >= 85 else ('Moderate' if recovery_score >= 70 else 'Recovery Focus')
+    muscle_recovery_avg = sum(key_groups.values()) / max(1, len(key_groups))
+
+    rec_card = recovery_recommendation(recovery_score, workout_grade, muscle_snapshot)
+
+    st.markdown('<div class="dashboard-tight">', unsafe_allow_html=True)
+    st.markdown(textwrap.dedent(f"""
+    <div class="x-hero">
+      <div class="x-kicker">Brian Fit 5.0 • Executive Command Center</div>
+      <div class="x-title" style="font-size:2.4rem;font-weight:900;">Good Morning Brian</div>
+      <div class="x-sub">Recovery {recovery_score}% • Today's Focus: {focus}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;">
+        <div class="small"><b>Readiness:</b> {readiness_status}<br><b>Workout Streak:</b> {streak} day(s)<br><b>Weekly Progress:</b> {weekly_progress_pct}% ({sessions_7}/5 sessions)</div>
+        <div class="small"><b>Last Workout:</b> {last_workout_text}<br><b>AI Recommendation:</b> {coach_brief.next_best_action}</div>
+      </div>
+    </div>
+    """), unsafe_allow_html=True)
+
+    st.markdown('<div class="dashboard-title">Performance Intelligence</div>', unsafe_allow_html=True)
+    dashboard_cards = [
+        ('Strength Score', f'{perf_scores["strength_score"]:.1f}', None),
+        ('Fitness Score', f'{perf_scores["fitness_score"]:.1f}', None),
+        ('Weekly Volume', f'{int(perf_scores["weekly_volume"]):,}', None),
+        ('Personal Records', f'{int(pr_summary["total_prs"])}', None),
+        ('Workout Grade', str(workout_grade.label), f'{workout_grade.overall_score:.1f}/100'),
+        ('Muscle Recovery', f'{muscle_recovery_avg:.0f}%', None),
+    ]
+
+    for row_cards in [dashboard_cards[:3], dashboard_cards[3:]]:
+        cols = st.columns(3)
+        for col, (label, value, subvalue) in zip(cols, row_cards):
+            if subvalue is None:
+                col.markdown(
+                    f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                col.markdown(
+                    f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value-wrap">{value}</div><div class="metric-subvalue">{subvalue}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+    r1, r2 = st.columns([1.35, 1])
+    with r1:
+        st.markdown('<div class="side-card"><div class="side-title">PR Tracking Engine</div><div class="small">Heaviest weight, most reps, highest estimated 1RM, and highest total volume by exercise.</div></div>', unsafe_allow_html=True)
+        pr_rows = pr_summary.get('rows', pd.DataFrame())
+        if pr_rows.empty:
+            st.info('No workout history yet. Complete workouts to generate PR tracking.')
+        else:
+            st.dataframe(pr_rows.head(12), use_container_width=True)
+
+    with r2:
+        st.markdown('<div class="side-card"><div class="side-title">Recovery Recommendation</div>', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div style="margin-top:6px;">
+              <div class="small"><b>Plan:</b> {rec_card['training']}</div>
+              <div class="small" style="margin-top:8px;">{rec_card['note']}</div>
+              <div class="small" style="margin-top:10px;">{rec_card['hydration']}</div>
+              <div class="small" style="margin-top:6px;">{rec_card['sleep']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
     st.markdown(
         f"""
         <div class="side-card" style="margin-top:10px;">
-          <div class="side-title">AI Daily Brief</div>
-          <div class="small"><b>Recovery Status:</b> {coach_brief.recovery_status}</div>
-          <div class="small"><b>Training Recommendation:</b> {coach_brief.training_recommendation}</div>
-          <div class="small"><b>Nutrition Status:</b> {coach_brief.nutrition_status}</div>
-          <div class="small"><b>Body Trend:</b> {coach_brief.body_trend}</div>
-          <div class="small" style="margin-top:10px;"><b>Next Best Action:</b> {coach_brief.next_best_action}</div>
+          <div class="side-title">Workout Grade Engine</div>
+          <div class="small"><b>Latest Workout Date:</b> {workout_grade.date}</div>
+          <div class="small" style="margin-top:8px;"><b>Volume Score:</b> {workout_grade.volume_score}</div>
+          <div class="small"><b>Intensity Score:</b> {workout_grade.intensity_score}</div>
+          <div class="small"><b>Consistency Score:</b> {workout_grade.consistency_score}</div>
+          <div class="small"><b>Completion Score:</b> {workout_grade.completion_score}</div>
+          <div class="small" style="margin-top:8px;"><b>Overall:</b> {workout_grade.overall_score} / 100 ({workout_grade.label})</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    top_ready = muscle_snapshot.get("top_ready", []) or []
-    top_fatigued = muscle_snapshot.get("top_fatigued", []) or []
-    ready_text = " | ".join([f"{m['muscle'].title()} {m['readiness_percent']}%" for m in top_ready[:3]]) or "No strong ready signals yet."
-    fatigued_text = " | ".join([f"{m['muscle'].title()} {m['readiness_percent']}%" for m in top_fatigued[:3]]) or "No major fatigued muscles detected."
-    focus_text = str(muscle_snapshot.get("recommended_workout", "Moderate full-body technique session"))
+    matrix_groups = {
+        'Chest': ['chest'],
+        'Back': ['back'],
+        'Shoulders': ['shoulders'],
+        'Biceps': ['biceps'],
+        'Triceps': ['triceps'],
+        'Legs': ['quads', 'hamstrings', 'glutes', 'calves'],
+        'Core': ['core'],
+    }
 
-    st.markdown(
-        f"""
-        <div class="side-card" style="margin-top:10px;">
-                    <div class="side-title">Muscle Readiness</div>
-          <div class="small"><b>Top 3 Ready:</b> {ready_text}</div>
-          <div class="small" style="margin-top:8px;"><b>Top 3 Fatigued:</b> {fatigued_text}</div>
-                    <div class="small" style="margin-top:10px;"><b>Recommended Workout:</b> {focus_text}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    render_muscle_heatmap(muscle_snapshot, key_prefix="dashboard_readiness")
+    matrix_html = ['<div class="dashboard-title">Muscle Recovery Matrix</div><div class="matrix-grid">']
+    for group_name, keys in matrix_groups.items():
+        group_items = [muscles.get(k, {}) for k in keys]
+        pct_values = [float((item or {}).get('readiness_percent', 65) or 65) for item in group_items]
+        pct = sum(pct_values) / max(1, len(pct_values))
+        status = _status_from_pct(pct)
+        status_text = _status_label(status)
+        last_trained = _latest_date_text(group_items)
+        action = _suggested_action(group_items)
+        matrix_html.append(
+            f'<div class="matrix-card">'
+            f'<div class="matrix-top"><div class="matrix-name">{group_name}</div><span class="matrix-badge {_badge_class(status)}">{status_text}</span></div>'
+            f'<div class="matrix-pct">{pct:.0f}%</div>'
+            f'<div class="matrix-meta">Last trained: {last_trained}</div>'
+            f'<div class="matrix-action">{action}</div>'
+            f'<div class="matrix-bar"><div class="matrix-fill" style="width:{max(0, min(100, pct)):.0f}%;"></div></div>'
+            f'</div>'
+        )
+    matrix_html.append('</div>')
+    st.markdown(''.join(matrix_html), unsafe_allow_html=True)
 
     smart_metrics = dashboard_body_metrics(body_df)
     d1, d2, d3, d4, d5 = st.columns(5)
@@ -680,6 +809,7 @@ if page == "Dashboard":
             <div class="small">{len(d)} exercises</div>
         </div>
         ''', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Today's Workout":
     day = st.selectbox("Workout Day", days, index=date.today().weekday() if date.today().weekday()<7 else 0, key="x6_day")
@@ -1245,12 +1375,45 @@ elif page == "Progress Analytics":
     avg_body_feedback = float(body_feedback_series.mean()) if not body_feedback_series.empty else 0.0
     pr_count = log.groupby('exercise')['weight_lbs'].max().shape[0] if not log.empty and 'exercise' in log.columns else 0
     comeback_score = min(100, int((total_sessions * 5) + (min(total_volume, 50000) / 1000) + (pr_count * 2) - (avg_body_feedback * 3))) if total_sessions else 0
+    pr_summary = build_pr_summary(log)
+    workout_grade = compute_workout_grade(log)
+    perf_scores = performance_scores(log)
 
-    m1,m2,m3,m4 = st.columns(4)
-    m1.markdown(f'<div class="metric-card"><div class="metric-label">Comeback Score</div><div class="metric-value">{comeback_score}/100</div></div>', unsafe_allow_html=True)
-    m2.markdown(f'<div class="metric-card"><div class="metric-label">Workout Sessions</div><div class="metric-value">{total_sessions}</div></div>', unsafe_allow_html=True)
-    m3.markdown(f'<div class="metric-card"><div class="metric-label">Total Volume</div><div class="metric-value">{total_volume:,} lbs</div></div>', unsafe_allow_html=True)
-    m4.markdown(f'<div class="metric-card"><div class="metric-label">Avg Body Check-In</div><div class="metric-value">{avg_body_feedback:.1f}/10</div></div>', unsafe_allow_html=True)
+    progress_cards = [
+        ('Comeback Score', f'{comeback_score}/100', None),
+        ('Workout Sessions', f'{total_sessions}', None),
+        ('Total Volume', f'{total_volume:,} lbs', None),
+        ('Avg Body Check-In', f'{avg_body_feedback:.1f}/10', None),
+        ('Workout Grade', str(workout_grade.label), f'{workout_grade.overall_score:.1f}/100'),
+        ('Strength Score', f'{perf_scores["strength_score"]:.1f}', None),
+    ]
+
+    for row_cards in [progress_cards[:3], progress_cards[3:]]:
+        cols = st.columns(3)
+        for col, (label, value, subvalue) in zip(cols, row_cards):
+            if subvalue is None:
+                col.markdown(
+                    f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                col.markdown(
+                    f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value-wrap">{value}</div><div class="metric-subvalue">{subvalue}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown(
+        f"""
+        <div class="side-card" style="margin-top:10px;">
+          <div class="side-title">Workout Grade Engine</div>
+          <div class="small"><b>Date:</b> {workout_grade.date}</div>
+          <div class="small" style="margin-top:6px;"><b>Volume:</b> {workout_grade.volume_score} • <b>Intensity:</b> {workout_grade.intensity_score}</div>
+          <div class="small"><b>Consistency:</b> {workout_grade.consistency_score} • <b>Completion:</b> {workout_grade.completion_score}</div>
+          <div class="small" style="margin-top:6px;"><b>Overall:</b> {workout_grade.overall_score} / 100 ({workout_grade.label})</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     tab1, tab2, tab3, tab4 = st.tabs(['Strength', 'Body', 'Nutrition', 'Supplements'])
     with tab1:
@@ -1263,8 +1426,7 @@ elif page == "Progress Analytics":
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown('### Personal Records')
-                prs = log.groupby('exercise', as_index=False).agg(best_weight=('weight_lbs','max'), best_reps=('reps','max'), total_volume=('volume','sum')).sort_values(['best_weight','total_volume'], ascending=False)
-                st.dataframe(prs, use_container_width=True)
+                st.dataframe(pr_summary.get('rows', pd.DataFrame()), use_container_width=True)
             with c2:
                 st.markdown('### Top Exercises by Volume')
                 top = log.groupby('exercise', as_index=False)['volume'].sum().sort_values('volume', ascending=False).head(15)
