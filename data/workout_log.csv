@@ -1,1 +1,8 @@
-date,day,exercise,set_number,weight_lbs,reps,rpe,pain,notes,volume
+date,day,exercise,set_number,weight_lbs,reps,rpe,pain,notes,volume,body_feedback_score,body_feedback_notes
+2026-07-09,Thursday,Leg Curl,1,85.0,15,7.0,0,,1275,0,
+2026-07-09,Thursday,Hip Adduction Machine,1,150.0,15,7.0,0,,2250,0,
+2026-07-09,Thursday,Leg Curl,1,85.0,15,7.0,0,,1275,0,
+2026-07-09,Thursday,Leg Curl,1,100.0,10,8.0,0,test save,1000,0,test save
+2026-07-09,Thursday,Leg Curl,1,100.0,10,8.0,0,test save,1000,0,test save
+2026-07-09,Thursday,Leg Curl,1,100.0,10,8.0,0,Data Manager validation test,1000,0,Data Manager validation test
+2026-07-09,Thursday,Leg Curl,1,100.0,10,8.0,0,Data Manager validation test,1000,0,Data Manager validation test

@@ -22,11 +22,10 @@ from engines.ai_coach_engine import build_daily_brief
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
-from engines.cloud_database import (
-    fetch_cloud_row_count,
-    insert_workout_rows,
-    is_cloud_configured,
-    sync_local_csv_to_cloud,
+from services.supabase_service import (
+    get_workouts,
+    health_check,
+    save_workout,
 )
 from engines.performance_intelligence import (
     build_pr_summary,
@@ -179,7 +178,7 @@ def load_workouts():
     df = pd.read_csv(WORKOUTS)
     return repair_workout_database(df)
 
-def load_log():
+def load_log_local():
     ensure_log()
     try:
         df = pd.read_csv(LOG)
@@ -207,6 +206,52 @@ def load_log():
     return df
 
 
+def normalize_cloud_workouts(rows):
+    base_cols = ['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','body_feedback_score','notes','body_feedback_notes','volume']
+    if not rows:
+        return pd.DataFrame(columns=base_cols)
+
+    df = pd.DataFrame(rows)
+    if 'workout_date' in df.columns:
+        df['date'] = pd.to_datetime(df['workout_date'], errors='coerce').dt.date.astype(str)
+    elif 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date.astype(str)
+    else:
+        df['date'] = ''
+
+    for col in ['day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume']:
+        if col not in df.columns:
+            df[col] = ''
+
+    df['pain'] = df['body_feedback_score']
+    df['notes'] = df['body_feedback_notes']
+
+    for col in ['set_number','weight_lbs','reps','rpe','body_feedback_score','volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    return df[base_cols]
+
+
+def load_log(return_meta=False):
+    cloud_rows, cloud_error = get_workouts()
+    if cloud_error:
+        df = load_log_local()
+        if return_meta:
+            return df, 'csv_fallback', cloud_error
+        return df
+
+    if not cloud_rows:
+        df = load_log_local()
+        if return_meta:
+            return df, 'csv_fallback_empty_cloud', None
+        return df
+
+    df = normalize_cloud_workouts(cloud_rows)
+    if return_meta:
+        return df, 'cloud', None
+    return df
+
+
 def get_supabase_credentials():
     try:
         supabase_url = str(st.secrets.get('SUPABASE_URL', '')).strip()
@@ -223,6 +268,16 @@ def update_cloud_sync_state(ok: bool, message: str, inserted: int = 0, error: st
         'inserted': int(inserted),
         'error': str(error or ''),
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+
+def update_last_save_debug(attempted_row: dict, ok: bool, error: str = ''):
+    st.session_state['last_save_debug'] = {
+        'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'status': 'success' if bool(ok) else 'error',
+        'error': str(error or ''),
+        'last_saved_exercise': str((attempted_row or {}).get('exercise', '')),
+        'workout': dict(attempted_row or {}),
     }
 
 
@@ -251,18 +306,87 @@ def resolve_body_feedback_notes(df: pd.DataFrame) -> pd.Series:
 
 def save_log(rows):
     ensure_log()
-    old = load_log()
-    new = pd.DataFrame(rows)
-    pd.concat([old,new], ignore_index=True).to_csv(LOG,index=False)
+    csv_ok = True
+    csv_error = ''
+    try:
+        old = load_log_local()
+        new = pd.DataFrame(rows)
+        pd.concat([old, new], ignore_index=True).to_csv(LOG, index=False)
+    except Exception as exc:
+        csv_ok = False
+        csv_error = str(exc)
 
-    supabase_url, supabase_key = get_supabase_credentials()
-    cloud_result = insert_workout_rows(rows, supabase_url, supabase_key)
+    inserted = 0
+    failed = 0
+    last_error = ''
+
+    def _row_matches_cloud(cloud_row: dict, local_row: dict) -> bool:
+        return (
+            str(cloud_row.get('workout_date', '')).strip() == str(local_row.get('date', '')).strip()
+            and str(cloud_row.get('day', '')).strip().lower() == str(local_row.get('day', '')).strip().lower()
+            and str(cloud_row.get('exercise', '')).strip().lower() == str(local_row.get('exercise', '')).strip().lower()
+            and int(float(cloud_row.get('set_number') or 0)) == int(float(local_row.get('set_number') or 0))
+            and float(cloud_row.get('weight_lbs') or 0) == float(local_row.get('weight_lbs') or 0)
+            and int(float(cloud_row.get('reps') or 0)) == int(float(local_row.get('reps') or 0))
+        )
+
+    for row in rows:
+        before_rows, before_err = get_workouts()
+        before_count = len(before_rows) if not before_err else None
+
+        cloud_row = {
+            'workout_date': row.get('date'),
+            'day': row.get('day'),
+            'exercise': row.get('exercise'),
+            'set_number': row.get('set_number'),
+            'weight_lbs': row.get('weight_lbs'),
+            'reps': row.get('reps'),
+            'rpe': row.get('rpe'),
+            'body_feedback_score': row.get('body_feedback_score', row.get('pain', 0)),
+            'body_feedback_notes': row.get('body_feedback_notes', row.get('notes', '')),
+            'volume': row.get('volume'),
+        }
+        ok, err = save_workout(cloud_row)
+        if not ok:
+            failed += 1
+            last_error = str(err)
+            continue
+
+        after_rows, after_err = get_workouts()
+        if after_err:
+            failed += 1
+            last_error = str(after_err)
+            continue
+
+        after_count = len(after_rows)
+        row_verified = any(_row_matches_cloud(r, row) for r in after_rows)
+        count_increased = before_count is not None and after_count > before_count
+        if count_increased or row_verified:
+            inserted += 1
+        else:
+            failed += 1
+            last_error = 'Verification failed: workout count did not increase after insert.'
+
+    cloud_ok = failed == 0
+    cloud_message = 'Workout saved to Supabase and verified' if cloud_ok else str(last_error or 'Unknown Supabase error')
     update_cloud_sync_state(
-        ok=cloud_result.ok,
-        message=cloud_result.message,
-        inserted=cloud_result.inserted,
-        error=cloud_result.error,
+        ok=cloud_ok,
+        message=cloud_message,
+        inserted=inserted,
+        error=last_error,
     )
+
+    first_row = rows[0] if rows else {}
+    update_last_save_debug(first_row, ok=cloud_ok and csv_ok, error=(last_error or csv_error))
+
+    return {
+        'supabase_ok': cloud_ok,
+        'supabase_message': cloud_message,
+        'supabase_error': str(last_error or ''),
+        'csv_ok': csv_ok,
+        'csv_error': str(csv_error or ''),
+        'inserted': inserted,
+    }
 
 def image_path(row):
     f = str(row.get('image_file','')).strip()
@@ -516,9 +640,9 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Dashboard","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 5.1")
-st.sidebar.caption("X.8 Executive Dashboard Redesign")
-st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Workout history saves to</span><br><b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
+st.sidebar.markdown("## 🏋️ Brian Fit 5.3")
+st.sidebar.caption("X.10 Permanent Cloud Workout Engine")
+st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 st.markdown('<div class="mobile-nav-title">📱 Quick Navigation</div>', unsafe_allow_html=True)
 page = st.radio("Mobile / Desktop Navigation", nav_options, horizontal=True, key="main_nav", label_visibility="collapsed")
@@ -603,7 +727,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-      <div class="x-kicker">Brian Fit 5.1 • X.8 Executive Dashboard Redesign</div>
+    <div class="x-kicker">Brian Fit 5.3 • X.10 Permanent Cloud Workout Engine</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -805,8 +929,13 @@ elif page == "Today's Workout":
         )
         # Preserve existing logging behavior: when complete, save log and advance
         if result.get('complete'):
-            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':result.get('set_number',1),'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
-            st.success(f"Saved set {result.get('set_number',1)} for {row.exercise}. Rest, breathe, and move with control.")
+            save_result = save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':result.get('set_number',1),'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
+            if save_result.get('supabase_ok'):
+                st.success(str(save_result.get('supabase_message', 'Workout saved to Supabase and verified')))
+            else:
+                st.error(str(save_result.get('supabase_error') or 'Unknown Supabase error'))
+            if not save_result.get('csv_ok'):
+                st.error(f"CSV backup failed: {save_result.get('csv_error')}")
             if st.session_state.x6_idx < len(active)-1:
                 st.session_state.x6_idx += 1
                 st.rerun()
@@ -889,8 +1018,13 @@ elif page == "Gym Mode":
             key_prefix="gym",
         )
         if result.get('complete'):
-            save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':1,'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
-            st.success("Set saved. Start your rest timer.")
+            save_result = save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':1,'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
+            if save_result.get('supabase_ok'):
+                st.success(str(save_result.get('supabase_message', 'Workout saved to Supabase and verified')))
+            else:
+                st.error(str(save_result.get('supabase_error') or 'Unknown Supabase error'))
+            if not save_result.get('csv_ok'):
+                st.error(f"CSV backup failed: {save_result.get('csv_error')}")
         st.markdown("### Rest Timer")
         t = st.selectbox("Timer", [45,60,75,90,120], index=1, key="gym_timer")
         st.info(f"Rest {t} seconds, then move to the next set/exercise.")
@@ -1404,7 +1538,11 @@ elif page == "Exercise Library":
 
 elif page == "History":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
-    log=load_log()
+    log, source, cloud_error = load_log(return_meta=True)
+    if source == 'csv_fallback' and cloud_error:
+        st.warning('Cloud unavailable')
+    if source == 'csv_fallback_empty_cloud':
+        st.info('Supabase returned no rows. Showing local CSV backup.')
     if log.empty: st.info('No workouts saved yet.')
     else:
         display_log = log.copy()
@@ -1438,57 +1576,93 @@ elif page == "Data Manager":
                     )
 
     st.markdown('### Cloud Database')
-    local_rows = len(load_log())
-    supabase_url, supabase_key = get_supabase_credentials()
-    cloud_enabled = is_cloud_configured(supabase_url, supabase_key)
-    cloud_rows = None
-    cloud_error = None
+    cloud_health = health_check()
+    cloud_rows = int(cloud_health.get('workout_count', 0) or 0)
+    status_label = 'Connected' if cloud_health.get('connected') else 'Disconnected'
+    database_health = str(cloud_health.get('status', 'unavailable'))
+    health_message = str(cloud_health.get('message', ''))
 
-    if cloud_enabled:
-        cloud_rows, cloud_error = fetch_cloud_row_count(supabase_url, supabase_key)
-
-    if not cloud_enabled:
-        status_label = 'Not Configured'
-        st.info('Cloud sync is optional. Add SUPABASE_URL and SUPABASE_KEY in Streamlit secrets to enable permanent cloud sync. Local CSV backups continue to work normally.')
-    elif cloud_error:
-        status_label = 'Connection Error'
-        st.warning('Supabase is configured, but cloud status could not be loaded right now. Local CSV backups are still active.')
-    else:
-        status_label = 'Connected'
+    if cloud_health.get('connected'):
         st.success('Cloud database is connected and available.')
+    else:
+        st.warning('Cloud database is disconnected. Local CSV backup remains available.')
 
     last_sync = st.session_state.get('cloud_sync_status', {})
     last_sync_time = str(last_sync.get('timestamp', 'No sync attempts this session'))
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric('Cloud Database Status', status_label)
-    c2.metric('Last Sync', last_sync_time)
-    c3.metric('Local Rows', str(local_rows))
-    c4.metric('Cloud Rows', str(cloud_rows) if cloud_rows is not None else 'N/A')
+    c1.metric('Cloud Status', status_label)
+    c2.metric('Number of Workouts', str(cloud_rows) if cloud_health.get('connected') else 'N/A')
+    c3.metric('Last Sync Time', last_sync_time)
+    c4.metric('Database Health', database_health)
 
+    last_save_debug = st.session_state.get('last_save_debug', {})
+    ls1, ls2, ls3, ls4 = st.columns(4)
+    ls1.metric('Last Save Attempted', str(last_save_debug.get('attempted_at', 'Never')))
+    ls2.metric('Last Save Status', str(last_save_debug.get('status', 'unknown')))
+    ls3.metric('Last Save Error', str(last_save_debug.get('error', '')) or 'None')
+    ls4.metric('Last Saved Exercise', str(last_save_debug.get('last_saved_exercise', 'None')))
+
+    if health_message:
+        st.caption(health_message)
     if last_sync:
-        if last_sync.get('ok'):
-            st.caption(f"Last sync result: {last_sync.get('message', '')}")
-        else:
-            st.caption(f"Last sync result: {last_sync.get('message', '')}")
+        st.caption(f"Last sync result: {last_sync.get('message', '')}")
 
-    sync_button_disabled = not cloud_enabled
-    if st.button('Sync local CSV to cloud', use_container_width=True, disabled=sync_button_disabled):
-        sync_result = sync_local_csv_to_cloud(LOG, supabase_url, supabase_key)
-        update_cloud_sync_state(
-            ok=sync_result.ok,
-            message=sync_result.message,
-            inserted=sync_result.inserted,
-            error=sync_result.error,
-        )
-        if sync_result.ok:
-            st.success(sync_result.message)
-        else:
-            st.warning(sync_result.message)
+    st.markdown('### Cloud Diagnostics')
+    with st.expander('Show Supabase diagnostic details', expanded=False):
+        st.write({
+            'connected': bool(cloud_health.get('connected')),
+            'status': str(cloud_health.get('status', 'unknown')),
+            'workout_count': int(cloud_health.get('workout_count', 0) or 0),
+            'last_checked': str(cloud_health.get('last_checked', '')),
+            'message': str(cloud_health.get('message', '')),
+            'error': str(cloud_health.get('error', '')),
+        })
+        if last_sync:
+            st.write({
+                'last_sync_ok': bool(last_sync.get('ok')),
+                'last_sync_inserted': int(last_sync.get('inserted', 0) or 0),
+                'last_sync_time': str(last_sync.get('timestamp', '')),
+                'last_sync_message': str(last_sync.get('message', '')),
+                'last_sync_error': str(last_sync.get('error', '')),
+            })
 
-        cloud_rows_after, cloud_error_after = fetch_cloud_row_count(supabase_url, supabase_key)
-        if cloud_error_after is None and cloud_rows_after is not None:
-            st.caption(f"Cloud rows after sync: {cloud_rows_after}")
+    if cloud_health.get('connected'):
+        cloud_rows_export, cloud_error = get_workouts()
+        if cloud_error:
+            st.warning('Cloud unavailable')
+        else:
+            export_df = normalize_cloud_workouts(cloud_rows_export)
+            st.download_button(
+                'Export Workout History',
+                export_df.to_csv(index=False).encode('utf-8'),
+                file_name='workout_history_cloud.csv',
+            )
+
+    st.markdown('### Validation Test')
+    if st.button('Run Test Save: Leg Curl 100 lbs x 10 reps x 1 set', use_container_width=True):
+        test_day = date.today().strftime('%A')
+        test_row = {
+            'date': str(date.today()),
+            'day': test_day,
+            'exercise': 'Leg Curl',
+            'set_number': 1,
+            'weight_lbs': 100,
+            'reps': 10,
+            'rpe': 8.0,
+            'pain': 0,
+            'body_feedback_score': 0,
+            'notes': 'Data Manager validation test',
+            'body_feedback_notes': 'Data Manager validation test',
+            'volume': 1000,
+        }
+        test_result = save_log([test_row])
+        if test_result.get('supabase_ok'):
+            st.success('Workout saved to Supabase and verified')
+        else:
+            st.error(str(test_result.get('supabase_error') or 'Unknown Supabase error'))
+        if not test_result.get('csv_ok'):
+            st.error(f"CSV backup failed: {test_result.get('csv_error')}")
 
     if LOG.exists():
         st.download_button('Export workout_log.csv', LOG.read_bytes(), file_name='workout_log.csv')
