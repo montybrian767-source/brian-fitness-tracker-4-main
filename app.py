@@ -25,7 +25,12 @@ from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
 from services.supabase_service import (
     get_workouts,
     health_check,
-    save_workout,
+)
+from services.workout_save_service import (
+    build_workout_session_id,
+    get_last_save_result,
+    save_completed_set,
+    save_workout_session as unified_save_workout_session,
 )
 from engines.performance_intelligence import (
     build_pr_summary,
@@ -209,7 +214,7 @@ def load_log_local():
 def normalize_cloud_workouts(rows):
     base_cols = ['date','day','exercise','set_number','weight_lbs','reps','rpe','pain','body_feedback_score','notes','body_feedback_notes','volume']
     if not rows:
-        return pd.DataFrame(columns=base_cols)
+        return pd.DataFrame(columns=base_cols + ['workout_session_id'])
 
     df = pd.DataFrame(rows)
     if 'workout_date' in df.columns:
@@ -223,13 +228,16 @@ def normalize_cloud_workouts(rows):
         if col not in df.columns:
             df[col] = ''
 
+    if 'workout_session_id' not in df.columns:
+        df['workout_session_id'] = ''
+
     df['pain'] = df['body_feedback_score']
     df['notes'] = df['body_feedback_notes']
 
     for col in ['set_number','weight_lbs','reps','rpe','body_feedback_score','volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    return df[base_cols]
+    return df[base_cols + ['workout_session_id']]
 
 
 def load_log(return_meta=False):
@@ -241,9 +249,9 @@ def load_log(return_meta=False):
         return df
 
     if not cloud_rows:
-        df = load_log_local()
+        df = normalize_cloud_workouts([])
         if return_meta:
-            return df, 'csv_fallback_empty_cloud', None
+            return df, 'cloud', None
         return df
 
     df = normalize_cloud_workouts(cloud_rows)
@@ -281,6 +289,455 @@ def update_last_save_debug(attempted_row: dict, ok: bool, error: str = ''):
     }
 
 
+def get_recent_exercise_stats(log_df: pd.DataFrame, exercise_name: str) -> tuple[float, int, float]:
+    if log_df is None or log_df.empty or 'exercise' not in log_df.columns:
+        return 0.0, 0, 0.0
+
+    rows = log_df[log_df['exercise'].astype(str).str.strip().str.lower() == str(exercise_name).strip().lower()].copy()
+    if rows.empty:
+        return 0.0, 0, 0.0
+
+    rows['weight_lbs'] = pd.to_numeric(rows.get('weight_lbs', 0), errors='coerce').fillna(0)
+    rows['reps'] = pd.to_numeric(rows.get('reps', 0), errors='coerce').fillna(0)
+    rows['rpe'] = pd.to_numeric(rows.get('rpe', 0), errors='coerce').fillna(0)
+
+    last_row = rows.iloc[-1]
+    last_weight = float(last_row.get('weight_lbs', 0) or 0)
+    last_reps = int(float(last_row.get('reps', 0) or 0))
+    best_weight = float(rows['weight_lbs'].max() if not rows.empty else 0)
+    return last_weight, last_reps, best_weight
+
+
+def get_mobile_primary_page() -> str:
+    mapping = {
+        'Dashboard': 'Dashboard',
+        'Workout': "Today's Workout",
+        'Gym Mode': 'Gym Mode',
+        'History': 'History',
+        'Progress': 'Progress Analytics',
+        'More': 'More',
+    }
+
+    if 'mobile_more_active' not in st.session_state:
+        st.session_state['mobile_more_active'] = False
+
+    current = str(st.session_state.get('main_nav', 'Dashboard'))
+    reverse = {
+        "Today's Workout": 'Workout',
+        'Progress Analytics': 'Progress',
+    }
+    current_mobile = reverse.get(current, current if current in mapping else 'Dashboard')
+
+    st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
+    selected = st.radio(
+        'Mobile Primary Navigation',
+        ['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'],
+        horizontal=True,
+        key='mobile_primary_nav',
+        index=['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
+        label_visibility='collapsed',
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if selected == 'More':
+        st.session_state['mobile_more_active'] = True
+        more_options = [
+            'AI Coach',
+            'Workout Builder',
+            'Weekly Plan',
+            'Recovery Center',
+            'Nutrition',
+            'Supplements',
+            'Body Stats',
+            'Smart Scale',
+            'Exercise Library',
+            'Data Manager',
+            'System Check',
+        ]
+        more_target = st.selectbox('More', more_options, key='mobile_more_select')
+        st.session_state['main_nav'] = more_target
+        return more_target
+
+    st.session_state['mobile_more_active'] = False
+    target = mapping[selected]
+    st.session_state['main_nav'] = target
+    return target
+
+
+def get_rest_timer_state(flow_key: str) -> dict:
+    key = f'{flow_key}_rest_timer'
+    if key not in st.session_state:
+        st.session_state[key] = {
+            'duration': 90,
+            'remaining': 90,
+            'running': False,
+            'started_at': None,
+            'last_completed_set_at': '',
+        }
+    return st.session_state[key]
+
+
+def render_rest_timer(flow_key: str):
+    state = get_rest_timer_state(flow_key)
+    st.markdown('<div class="rest-timer-card">', unsafe_allow_html=True)
+    st.markdown('### Rest Timer')
+    quick = st.radio(
+        'Quick timer',
+        ['60 sec', '90 sec', '120 sec', '180 sec'],
+        horizontal=True,
+        key=f'{flow_key}_rest_quick',
+        index=[60, 90, 120, 180].index(int(state.get('duration', 90))) if int(state.get('duration', 90)) in [60, 90, 120, 180] else 1,
+    )
+    selected_seconds = int(str(quick).split()[0])
+    if selected_seconds != int(state.get('duration', 90)) and not bool(state.get('running', False)):
+        state['duration'] = selected_seconds
+        state['remaining'] = selected_seconds
+
+    if bool(state.get('running', False)) and state.get('started_at'):
+        elapsed = (datetime.now() - state['started_at']).total_seconds()
+        remaining = max(0, int(state.get('duration', 90) - elapsed))
+        state['remaining'] = remaining
+        if remaining <= 0:
+            state['running'] = False
+            state['started_at'] = None
+
+    st.markdown(f'<div class="rest-countdown">{int(state.get("remaining", 0))}s</div>', unsafe_allow_html=True)
+    if int(state.get('remaining', 0)) == 0:
+        st.success('Rest complete')
+
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button('Start', key=f'{flow_key}_rest_start', use_container_width=True):
+        state['duration'] = int(selected_seconds)
+        state['started_at'] = datetime.now() - pd.to_timedelta(int(state.get('duration', selected_seconds)) - int(state.get('remaining', selected_seconds)), unit='s')
+        state['running'] = True
+    if b2.button('Pause', key=f'{flow_key}_rest_pause', use_container_width=True):
+        state['running'] = False
+        state['started_at'] = None
+    if b3.button('Reset', key=f'{flow_key}_rest_reset', use_container_width=True):
+        state['duration'] = int(selected_seconds)
+        state['remaining'] = int(selected_seconds)
+        state['running'] = False
+        state['started_at'] = None
+    if b4.button('Skip', key=f'{flow_key}_rest_skip', use_container_width=True):
+        state['remaining'] = 0
+        state['running'] = False
+        state['started_at'] = None
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def build_session_metrics(session_sets: list[dict], started_at: Optional[datetime] = None) -> dict:
+    rows = list(session_sets or [])
+    if not rows:
+        return {
+            'duration_min': 0,
+            'exercise_count': 0,
+            'set_count': 0,
+            'total_volume': 0,
+            'avg_rpe': 0.0,
+            'highest_weight_exercise': 'N/A',
+            'estimated_calories': 0,
+        }
+
+    df = pd.DataFrame(rows)
+    df['weight_lbs'] = pd.to_numeric(df.get('weight_lbs', 0), errors='coerce').fillna(0)
+    df['reps'] = pd.to_numeric(df.get('reps', 0), errors='coerce').fillna(0)
+    df['rpe'] = pd.to_numeric(df.get('rpe', 0), errors='coerce').fillna(0)
+    df['volume'] = pd.to_numeric(df.get('volume', 0), errors='coerce').fillna(0)
+
+    top_idx = df['weight_lbs'].idxmax() if not df.empty else None
+    top_ex = str(df.iloc[int(top_idx)].get('exercise', 'N/A')) if top_idx is not None and top_idx == top_idx else 'N/A'
+    duration_min = 0
+    if started_at is not None:
+        duration_min = max(1, int((datetime.now() - started_at).total_seconds() // 60))
+
+    total_volume = int(df['volume'].sum())
+    return {
+        'duration_min': int(duration_min),
+        'exercise_count': int(df['exercise'].astype(str).str.strip().str.lower().nunique()),
+        'set_count': int(len(df)),
+        'total_volume': total_volume,
+        'avg_rpe': round(float(df['rpe'].mean() if not df.empty else 0.0), 1),
+        'highest_weight_exercise': top_ex,
+        'estimated_calories': int(max(30, total_volume / 65.0)),
+    }
+
+
+def detect_session_prs(log_df: pd.DataFrame, session_sets: list[dict]) -> list[dict]:
+    if log_df is None or log_df.empty or not session_sets:
+        return []
+
+    base = log_df.copy()
+    for c in ['weight_lbs', 'reps', 'volume']:
+        if c in base.columns:
+            base[c] = pd.to_numeric(base[c], errors='coerce').fillna(0)
+        else:
+            base[c] = 0
+    base['exercise'] = base.get('exercise', pd.Series(dtype=str)).astype(str)
+    base['est_1rm'] = base['weight_lbs'] * (1 + (base['reps'] / 30.0))
+
+    prs = []
+    for row in session_sets:
+        ex = str(row.get('exercise', '')).strip()
+        if not ex:
+            continue
+        ex_hist = base[base['exercise'].str.strip().str.lower() == ex.lower()]
+        if ex_hist.empty:
+            continue
+
+        w = float(row.get('weight_lbs', 0) or 0)
+        r = float(row.get('reps', 0) or 0)
+        v = float(row.get('volume', w * r) or 0)
+        e1 = float(w * (1 + (r / 30.0)))
+
+        prev_weight = float(ex_hist['weight_lbs'].max())
+        prev_reps = float(ex_hist['reps'].max())
+        prev_vol = float(ex_hist['volume'].max())
+        prev_1rm = float(ex_hist['est_1rm'].max())
+
+        if w > prev_weight:
+            prs.append({'exercise': ex, 'record': 'Heaviest weight', 'previous': round(prev_weight, 1), 'new': round(w, 1), 'improvement': round(w - prev_weight, 1)})
+        if r > prev_reps:
+            prs.append({'exercise': ex, 'record': 'Most reps', 'previous': int(prev_reps), 'new': int(r), 'improvement': int(r - prev_reps)})
+        if v > prev_vol:
+            prs.append({'exercise': ex, 'record': 'Highest set volume', 'previous': round(prev_vol, 1), 'new': round(v, 1), 'improvement': round(v - prev_vol, 1)})
+        if e1 > prev_1rm:
+            prs.append({'exercise': ex, 'record': 'Highest estimated 1RM', 'previous': round(prev_1rm, 1), 'new': round(e1, 1), 'improvement': round(e1 - prev_1rm, 1)})
+    return prs
+
+
+def render_session_summary(save_result: dict, session_sets: list[dict], flow_key: str):
+    started_at = st.session_state.get(f'{flow_key}_started_at')
+    metrics = build_session_metrics(session_sets, started_at=started_at)
+    historical = load_log()
+    prs = detect_session_prs(historical, session_sets)
+
+    st.markdown('<div class="session-summary">', unsafe_allow_html=True)
+    st.success('Workout saved permanently')
+    st.caption('Cloud: Supabase')
+    if bool(save_result.get('session_id_supported', False)):
+        st.caption(f"Session ID: {str(save_result.get('session_id', ''))}")
+    else:
+        st.caption('Session ID tracking: unavailable until Supabase schema migration is applied.')
+    st.caption(f"Supabase verification: {int(save_result.get('verified_rows', 0))} row(s) verified")
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric('Duration', f"{metrics['duration_min']} min")
+    a2.metric('Exercises', str(metrics['exercise_count']))
+    a3.metric('Sets', str(metrics['set_count']))
+    a4.metric('Total Volume', f"{metrics['total_volume']:,} lbs")
+
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric('Average RPE', f"{metrics['avg_rpe']:.1f}")
+    b2.metric('Top Exercise', str(metrics['highest_weight_exercise']))
+    b3.metric('Estimated Calories', str(metrics['estimated_calories']))
+    b4.metric('PRs', str(len(prs)))
+
+    if prs:
+        st.markdown('### New Personal Record')
+        for p in prs[:6]:
+            st.markdown(f"- {p['exercise']}: {p['record']} ({p['previous']} -> {p['new']}, +{p['improvement']})")
+
+    st.caption('Comparison with previous workout: based on recent cloud history for the same exercise patterns.')
+    st.caption('Suggested next workout: progress weight by 2.5-5 lbs where reps were completed with manageable RPE.')
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button('View History', key=f'{flow_key}_summary_history', use_container_width=True):
+        st.session_state['main_nav'] = 'History'
+        st.rerun()
+    if c2.button('View Progress', key=f'{flow_key}_summary_progress', use_container_width=True):
+        st.session_state['main_nav'] = 'Progress Analytics'
+        st.rerun()
+    if c3.button('Return to Dashboard', key=f'{flow_key}_summary_dashboard', use_container_width=True):
+        st.session_state['main_nav'] = 'Dashboard'
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def group_sessions(log_df: pd.DataFrame) -> pd.DataFrame:
+    if log_df is None or log_df.empty:
+        return pd.DataFrame(columns=['session_key', 'date', 'focus', 'sets', 'exercises', 'total_volume', 'avg_rpe', 'pr_count'])
+
+    df = log_df.copy()
+    if 'workout_session_id' not in df.columns:
+        df['workout_session_id'] = ''
+    if 'date' not in df.columns:
+        df['date'] = ''
+    if 'day' not in df.columns:
+        df['day'] = ''
+    if 'exercise' not in df.columns:
+        df['exercise'] = ''
+    if 'volume' not in df.columns:
+        df['volume'] = 0
+    if 'rpe' not in df.columns:
+        df['rpe'] = 0
+
+    df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
+    df['rpe'] = pd.to_numeric(df['rpe'], errors='coerce').fillna(0)
+    df['session_key'] = df['workout_session_id'].astype(str).str.strip()
+    empty_sid = df['session_key'].eq('')
+    df.loc[empty_sid, 'session_key'] = (
+        df.loc[empty_sid, 'date'].astype(str).str.strip() + '|' + df.loc[empty_sid, 'day'].astype(str).str.strip()
+    )
+
+    grouped = df.groupby('session_key', as_index=False).agg(
+        date=('date', 'max'),
+        focus=('day', 'max'),
+        sets=('exercise', 'count'),
+        exercises=('exercise', lambda s: int(s.astype(str).str.strip().str.lower().nunique())),
+        total_volume=('volume', 'sum'),
+        avg_rpe=('rpe', 'mean'),
+    )
+    grouped['pr_count'] = 0
+    grouped = grouped.sort_values('date', ascending=False)
+    return grouped
+
+
+def make_workout_session_id(flow_key: str) -> str:
+    state_key = f'{flow_key}_session_id'
+    existing = str(st.session_state.get(state_key, '')).strip()
+    if existing:
+        return existing
+    new_id = build_workout_session_id()
+    st.session_state[state_key] = new_id
+    return new_id
+
+
+def get_pending_sets(flow_key: str):
+    state_key = f'{flow_key}_pending_sets'
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+    return st.session_state[state_key]
+
+
+def clear_pending_sets(flow_key: str):
+    st.session_state[f'{flow_key}_pending_sets'] = []
+    st.session_state[f'{flow_key}_session_id'] = ''
+
+
+def build_set_row(day: str, exercise: str, result: dict, session_id: str):
+    weight = float(result.get('weight', 0.0) or 0.0)
+    reps = int(float(result.get('reps', 0) or 0))
+    return {
+        'date': str(date.today()),
+        'workout_date': str(date.today()),
+        'day': str(day),
+        'exercise': str(exercise),
+        'set_number': int(float(result.get('set_number', 1) or 1)),
+        'weight_lbs': weight,
+        'reps': reps,
+        'rpe': float(result.get('rpe', 0.0) or 0.0),
+        'pain': int(float(result.get('body_feedback_score', result.get('pain', 0)) or 0)),
+        'body_feedback_score': int(float(result.get('body_feedback_score', result.get('pain', 0)) or 0)),
+        'notes': str(result.get('body_feedback_notes', result.get('notes', ''))),
+        'body_feedback_notes': str(result.get('body_feedback_notes', result.get('notes', ''))),
+        'volume': float(weight * reps),
+        'workout_session_id': str(session_id),
+    }
+
+
+def save_rows_to_cloud_then_backup(rows, save_source_label='phone_workout'):
+    session_id = str(rows[0].get('workout_session_id', '') if rows else '')
+    save_result = unified_save_workout_session(
+        session_data={
+            'session_id': session_id,
+            'save_source_label': save_source_label,
+        },
+        completed_sets=rows,
+    )
+    supabase_ok = bool(save_result.get('ok'))
+    exact_error = str(save_result.get('cloud_error', '') or '')
+
+    csv_ok = bool(save_result.get('csv_backup_ok', True))
+    csv_error = str(save_result.get('csv_backup_error', '') or '')
+
+    sets_attempted = int(save_result.get('sets_attempted', len(rows)))
+    sets_inserted = int(save_result.get('sets_inserted', 0))
+    duplicates_skipped = int(save_result.get('duplicates_skipped', 0))
+    verified_rows = int(save_result.get('verified_rows', 0))
+    session_id = str(save_result.get('session_id', session_id))
+    session_id_supported = bool(save_result.get('session_id_supported', False))
+    session_id_used = bool(session_id_supported and session_id)
+    unique_exercises = len(set([str(r.get('exercise', '')).strip().lower() for r in rows if str(r.get('exercise', '')).strip()]))
+    verified_cloud_count = int(save_result.get('after_count', 0))
+    history_source = str(save_result.get('history_source', 'Supabase Cloud' if supabase_ok else 'Local CSV Backup'))
+
+    if supabase_ok:
+        sync_message = 'Workout saved permanently'
+    else:
+        sync_message = 'Cloud save failed'
+    update_cloud_sync_state(
+        ok=supabase_ok,
+        message=sync_message,
+        inserted=sets_inserted,
+        error=exact_error,
+    )
+
+    previous_debug = st.session_state.get('last_save_debug', {})
+    st.session_state['last_save_debug'] = {
+        'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'status': 'success' if supabase_ok else 'error',
+        'error': str(exact_error or csv_error or ''),
+        'last_saved_exercise': str(rows[-1].get('exercise', '')) if rows else '',
+        'last_save_source': 'supabase' if supabase_ok else 'backup_only',
+        'last_workout_session_id': session_id,
+        'session_id_supported': session_id_supported,
+        'session_id_used': session_id_used,
+        'sets_attempted': sets_attempted,
+        'sets_inserted': sets_inserted,
+        'duplicates_skipped': duplicates_skipped,
+        'verified_rows': verified_rows,
+        'history_source': history_source,
+        'last_successful_sync_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if supabase_ok else str(previous_debug.get('last_successful_sync_time', '')),
+        'save_source_label': save_source_label,
+        'workout': dict(rows[-1]) if rows else {},
+    }
+
+    return {
+        'supabase_ok': supabase_ok,
+        'supabase_error': exact_error,
+        'csv_ok': csv_ok,
+        'csv_error': csv_error,
+        'sets_attempted': sets_attempted,
+        'sets_inserted': sets_inserted,
+        'duplicates_skipped': duplicates_skipped,
+        'verified_rows': verified_rows,
+        'exercises_saved': unique_exercises,
+        'session_id': session_id,
+        'session_id_supported': session_id_supported,
+        'session_id_used': session_id_used,
+        'already_saved': bool(save_result.get('already_saved', False)),
+        'status': str(save_result.get('status', '')),
+        'history_source': history_source,
+        'verified_cloud_row_count': verified_cloud_count,
+    }
+
+
+def render_cloud_save_success(save_result: dict):
+    if bool(save_result.get('already_saved', False)):
+        st.info('Already saved')
+    else:
+        st.success('Workout saved permanently')
+    st.caption('Cloud: Supabase')
+    if bool(save_result.get('session_id_supported', False)) and bool(save_result.get('session_id_used', False)):
+        st.caption(f"Session ID: {str(save_result.get('session_id', ''))}")
+    else:
+        st.caption('Session ID tracking: unavailable until Supabase schema migration is applied.')
+    st.caption(f"Sets saved: {int(save_result.get('sets_inserted', 0))}")
+    st.caption(f"Exercises saved: {int(save_result.get('exercises_saved', 0))}")
+    st.caption(f"Duplicates skipped: {int(save_result.get('duplicates_skipped', 0))}")
+    st.caption(f"Verified rows: {int(save_result.get('verified_rows', 0))}")
+    st.caption(f"Verified cloud row count: {int(save_result.get('verified_cloud_row_count', 0))}")
+
+
+def render_cloud_save_failure(save_result: dict):
+    st.error('Cloud save failed')
+    st.error(f"Exact error: {str(save_result.get('supabase_error') or 'Unknown Supabase error')}")
+    if save_result.get('csv_ok'):
+        st.warning('Backup-only save: row written to local CSV.')
+    else:
+        st.error(f"CSV backup failed: {str(save_result.get('csv_error') or 'Unknown CSV error')}")
+
+
 def resolve_body_feedback_score(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=float)
@@ -305,88 +762,7 @@ def resolve_body_feedback_notes(df: pd.DataFrame) -> pd.Series:
     return pd.Series([''] * len(df), index=df.index, dtype=str)
 
 def save_log(rows):
-    ensure_log()
-    csv_ok = True
-    csv_error = ''
-    try:
-        old = load_log_local()
-        new = pd.DataFrame(rows)
-        pd.concat([old, new], ignore_index=True).to_csv(LOG, index=False)
-    except Exception as exc:
-        csv_ok = False
-        csv_error = str(exc)
-
-    inserted = 0
-    failed = 0
-    last_error = ''
-
-    def _row_matches_cloud(cloud_row: dict, local_row: dict) -> bool:
-        return (
-            str(cloud_row.get('workout_date', '')).strip() == str(local_row.get('date', '')).strip()
-            and str(cloud_row.get('day', '')).strip().lower() == str(local_row.get('day', '')).strip().lower()
-            and str(cloud_row.get('exercise', '')).strip().lower() == str(local_row.get('exercise', '')).strip().lower()
-            and int(float(cloud_row.get('set_number') or 0)) == int(float(local_row.get('set_number') or 0))
-            and float(cloud_row.get('weight_lbs') or 0) == float(local_row.get('weight_lbs') or 0)
-            and int(float(cloud_row.get('reps') or 0)) == int(float(local_row.get('reps') or 0))
-        )
-
-    for row in rows:
-        before_rows, before_err = get_workouts()
-        before_count = len(before_rows) if not before_err else None
-
-        cloud_row = {
-            'workout_date': row.get('date'),
-            'day': row.get('day'),
-            'exercise': row.get('exercise'),
-            'set_number': row.get('set_number'),
-            'weight_lbs': row.get('weight_lbs'),
-            'reps': row.get('reps'),
-            'rpe': row.get('rpe'),
-            'body_feedback_score': row.get('body_feedback_score', row.get('pain', 0)),
-            'body_feedback_notes': row.get('body_feedback_notes', row.get('notes', '')),
-            'volume': row.get('volume'),
-        }
-        ok, err = save_workout(cloud_row)
-        if not ok:
-            failed += 1
-            last_error = str(err)
-            continue
-
-        after_rows, after_err = get_workouts()
-        if after_err:
-            failed += 1
-            last_error = str(after_err)
-            continue
-
-        after_count = len(after_rows)
-        row_verified = any(_row_matches_cloud(r, row) for r in after_rows)
-        count_increased = before_count is not None and after_count > before_count
-        if count_increased or row_verified:
-            inserted += 1
-        else:
-            failed += 1
-            last_error = 'Verification failed: workout count did not increase after insert.'
-
-    cloud_ok = failed == 0
-    cloud_message = 'Workout saved to Supabase and verified' if cloud_ok else str(last_error or 'Unknown Supabase error')
-    update_cloud_sync_state(
-        ok=cloud_ok,
-        message=cloud_message,
-        inserted=inserted,
-        error=last_error,
-    )
-
-    first_row = rows[0] if rows else {}
-    update_last_save_debug(first_row, ok=cloud_ok and csv_ok, error=(last_error or csv_error))
-
-    return {
-        'supabase_ok': cloud_ok,
-        'supabase_message': cloud_message,
-        'supabase_error': str(last_error or ''),
-        'csv_ok': csv_ok,
-        'csv_error': str(csv_error or ''),
-        'inserted': inserted,
-    }
+    return save_rows_to_cloud_then_backup(rows, save_source_label='legacy_single')
 
 def image_path(row):
     f = str(row.get('image_file','')).strip()
@@ -628,6 +1004,22 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 .smart-photo-box{background:#081322;border:1px solid #1d3655;border-radius:22px;padding:10px;display:flex;align-items:center;justify-content:center;min-height:330px}.smart-photo{width:100%;height:330px;object-fit:contain;border-radius:16px;background:#06111f}.smart-exercise-title{font-size:2rem;color:white;font-weight:950;margin-bottom:8px}.smart-chip{display:inline-block;background:#0B2B4F;border:1px solid #60A5FA;color:#C8DDFF;border-radius:999px;padding:8px 12px;font-weight:900;font-size:.82rem;margin-right:8px;margin-bottom:8px}.smart-chip.green{background:rgba(34,197,94,.13);border-color:#22C55E;color:#B7FFCE}.smart-chip.purple{background:rgba(139,92,246,.16);border-color:#8B5CF6;color:#DDD6FE}.smart-control{background:#0B1E33;border:1px solid #254264;border-radius:18px;padding:16px}.smart-big-value{font-size:2rem;font-weight:950;color:white}.smart-complete{background:linear-gradient(135deg,#22C55E,#16A34A);border-radius:20px;padding:18px;text-align:center;color:white;font-size:1.2rem;font-weight:950;margin-top:14px;box-shadow:0 15px 40px rgba(34,197,94,.35)}
 .smart-timer{background:radial-gradient(circle at center,rgba(34,197,94,.20),rgba(15,31,52,.95));border:1px solid rgba(34,197,94,.50);border-radius:24px;padding:24px;text-align:center}.smart-timer-number{font-size:3.6rem;line-height:1;color:white;font-weight:950}.smart-timer-label{color:#86EFAC;font-weight:950;letter-spacing:.15em;margin-top:8px}.smart-progress{height:14px;background:#132940;border:1px solid #24334A;border-radius:999px;overflow:hidden;margin:14px 0}.smart-progress-fill{height:100%;background:linear-gradient(90deg,#2563EB,#22C55E);border-radius:999px}.smart-ai{background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(15,31,52,.98));border:1px solid rgba(139,92,246,.55);border-radius:22px;padding:20px;color:white}.smart-muted{color:#B8C2D1}.smart-nav-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}@media(max-width:900px){.smart-title{font-size:2rem}.smart-score{text-align:left;font-size:2.5rem}.smart-score-label{text-align:left}.smart-photo,.smart-photo-box{height:250px;min-height:250px}}
 
+.mobile-nav-shell{position:sticky; top:0; z-index:12; backdrop-filter:blur(8px); background:rgba(7,17,31,.92); border:1px solid rgba(59,130,246,.35); border-radius:16px; padding:8px 10px; margin:0 0 12px 0}
+.rest-timer-card{background:linear-gradient(135deg,#0f1f34,#0a1728);border:1px solid rgba(96,165,250,.35);border-radius:20px;padding:16px;margin-top:12px}
+.rest-countdown{font-size:2.4rem;font-weight:900;color:#22c55e;text-align:center;margin:6px 0 10px 0}
+.session-summary{background:linear-gradient(135deg,#0f1f34,#0a1728);border:1px solid rgba(34,197,94,.45);border-radius:24px;padding:18px;margin:14px 0}
+.history-session-card{background:linear-gradient(135deg,#0f1f34,#0a1728);border:1px solid rgba(96,165,250,.35);border-radius:18px;padding:14px;margin:10px 0}
+.chart-shell{background:#0e1a2d;border:1px solid rgba(96,165,250,.24);border-radius:16px;padding:10px}
+
+@media (max-width: 850px){
+    section[data-testid="stSidebar"]{display:none !important;}
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"]{min-height:44px; font-size:0.95rem; font-weight:800;}
+    .title{font-size:1.6rem}
+    .x-title{font-size:1.85rem}
+    .mobile-nav-shell div[role="radiogroup"]{overflow-x:auto; white-space:nowrap; display:flex; gap:6px; padding-bottom:2px}
+    .mobile-nav-shell label{flex:0 0 auto}
+}
+
 
 
 /* Sprint X.6 Elite Workout Experience */
@@ -640,12 +1032,12 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Dashboard","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 5.3")
-st.sidebar.caption("X.10 Permanent Cloud Workout Engine")
+st.sidebar.markdown("## 🏋️ Brian Fit 6.0")
+st.sidebar.caption("X.13 Mobile Performance Platform")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
-st.markdown('<div class="mobile-nav-title">📱 Quick Navigation</div>', unsafe_allow_html=True)
-page = st.radio("Mobile / Desktop Navigation", nav_options, horizontal=True, key="main_nav", label_visibility="collapsed")
+page = get_mobile_primary_page()
+st.session_state['main_nav'] = page
 
 workouts = load_workouts()
 log = load_log()
@@ -727,7 +1119,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-    <div class="x-kicker">Brian Fit 5.3 • X.10 Permanent Cloud Workout Engine</div>
+        <div class="x-kicker">Brian Fit 6.0 • X.13 Mobile Performance Platform</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -885,6 +1277,14 @@ elif page == "Today's Workout":
     if active.empty:
         st.success("Recovery day. Use mobility, walking, sauna, swimming, or rest.")
     else:
+        flow_key = 'x6'
+        session_id = make_workout_session_id(flow_key)
+        pending_sets = get_pending_sets(flow_key)
+        saving_key = f'{flow_key}_saving'
+        is_saving = bool(st.session_state.get(saving_key, False))
+        if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
+            st.session_state[f'{flow_key}_started_at'] = datetime.now()
+
         if 'x6_idx' not in st.session_state:
             st.session_state.x6_idx = 0
         st.session_state.x6_idx = max(0, min(int(st.session_state.x6_idx), len(active)-1))
@@ -898,13 +1298,11 @@ elif page == "Today's Workout":
         recent_ex = pd.DataFrame()
         if not log_now.empty and 'exercise' in log_now.columns:
             recent_ex = log_now[log_now['exercise'].astype(str) == str(row.exercise)].copy()
-        last_weight = float(row.base_weight)
-        best_weight = float(row.base_weight)
-        if not recent_ex.empty and 'weight_lbs' in recent_ex.columns:
-            vals = pd.to_numeric(recent_ex['weight_lbs'], errors='coerce').dropna()
-            if not vals.empty:
-                last_weight = float(vals.iloc[-1])
-                best_weight = float(vals.max())
+        last_weight, last_reps, best_weight = get_recent_exercise_stats(log_now, row.exercise)
+        if last_weight <= 0:
+            last_weight = float(row.base_weight)
+        if best_weight <= 0:
+            best_weight = float(row.base_weight)
 
         photo_html = img_tag(image_path(row)).replace('class="exercise-photo"', 'class="x6-photo"')
         # Fetch exercise intelligence
@@ -917,6 +1315,7 @@ elif page == "Today's Workout":
             total=len(active),
             photo_html=photo_html,
             last_weight=last_weight,
+            last_reps=last_reps,
             best_weight=best_weight,
             sets=sets,
             reps_default=reps_default,
@@ -929,16 +1328,75 @@ elif page == "Today's Workout":
         )
         # Preserve existing logging behavior: when complete, save log and advance
         if result.get('complete'):
-            save_result = save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':result.get('set_number',1),'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
+            st.session_state[saving_key] = True
+            set_row = build_set_row(day=day, exercise=row.exercise, result=result, session_id=session_id)
+            single_set_result = save_completed_set(set_row)
+            save_result = {
+                'supabase_ok': bool(single_set_result.get('ok')),
+                'supabase_error': str(single_set_result.get('cloud_error', '') or ''),
+                'csv_ok': bool(single_set_result.get('csv_backup_ok', True)),
+                'csv_error': str(single_set_result.get('csv_backup_error', '') or ''),
+                'sets_attempted': int(single_set_result.get('sets_attempted', 1)),
+                'sets_inserted': int(single_set_result.get('sets_inserted', 0)),
+                'duplicates_skipped': int(single_set_result.get('duplicates_skipped', 0)),
+                'verified_rows': int(single_set_result.get('verified_rows', 0)),
+                'exercises_saved': 1,
+                'session_id': str(single_set_result.get('session_id', session_id)),
+                'session_id_supported': bool(single_set_result.get('session_id_supported', False)),
+                'session_id_used': bool(single_set_result.get('session_id_supported', False) and str(single_set_result.get('session_id', session_id))),
+                'already_saved': bool(single_set_result.get('already_saved', False)),
+                'status': str(single_set_result.get('status', '')),
+                'history_source': str(single_set_result.get('history_source', 'Supabase Cloud' if single_set_result.get('ok') else 'Local CSV Backup')),
+                'verified_cloud_row_count': int(single_set_result.get('after_count', 0)),
+            }
+            update_cloud_sync_state(
+                ok=bool(save_result.get('supabase_ok')),
+                message='Workout saved permanently' if bool(save_result.get('supabase_ok')) else 'Cloud save failed',
+                inserted=int(save_result.get('sets_inserted', 0)),
+                error=str(save_result.get('supabase_error', '')),
+            )
+            previous_debug = st.session_state.get('last_save_debug', {})
+            st.session_state['last_save_debug'] = {
+                'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'status': 'success' if bool(save_result.get('supabase_ok')) else 'error',
+                'error': str(save_result.get('supabase_error', '') or save_result.get('csv_error', '') or ''),
+                'last_saved_exercise': str(row.exercise),
+                'last_save_source': 'supabase' if bool(save_result.get('supabase_ok')) else 'backup_only',
+                'last_workout_session_id': str(save_result.get('session_id', session_id)),
+                'session_id_supported': bool(save_result.get('session_id_supported', False)),
+                'session_id_used': bool(save_result.get('session_id_used', False)),
+                'sets_attempted': int(save_result.get('sets_attempted', 1)),
+                'sets_inserted': int(save_result.get('sets_inserted', 0)),
+                'duplicates_skipped': int(save_result.get('duplicates_skipped', 0)),
+                'verified_rows': int(save_result.get('verified_rows', 0)),
+                'history_source': str(save_result.get('history_source', 'Supabase Cloud' if bool(save_result.get('supabase_ok')) else 'Local CSV Backup')),
+                'last_successful_sync_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if bool(save_result.get('supabase_ok')) else str(previous_debug.get('last_successful_sync_time', '')),
+                'save_source_label': 'today_complete_set',
+                'workout': dict(set_row),
+            }
             if save_result.get('supabase_ok'):
-                st.success(str(save_result.get('supabase_message', 'Workout saved to Supabase and verified')))
+                # Keep an in-session mirror so Finish can submit full workout session safely on mobile reruns.
+                pending_sets[:] = [
+                    s for s in pending_sets
+                    if not (
+                        str(s.get('exercise', '')).strip().lower() == str(set_row.get('exercise', '')).strip().lower()
+                        and int(float(s.get('set_number', 0) or 0)) == int(float(set_row.get('set_number', 0) or 0))
+                    )
+                ]
+                pending_sets.append(set_row)
+                timer_state = get_rest_timer_state(flow_key)
+                timer_state['remaining'] = int(timer_state.get('duration', 90))
+                timer_state['running'] = False
+                timer_state['started_at'] = None
+                timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                render_cloud_save_success(save_result)
+                if st.session_state.x6_idx < len(active)-1:
+                    st.session_state[saving_key] = False
+                    st.session_state.x6_idx += 1
+                    st.rerun()
             else:
-                st.error(str(save_result.get('supabase_error') or 'Unknown Supabase error'))
-            if not save_result.get('csv_ok'):
-                st.error(f"CSV backup failed: {save_result.get('csv_error')}")
-            if st.session_state.x6_idx < len(active)-1:
-                st.session_state.x6_idx += 1
-                st.rerun()
+                render_cloud_save_failure(save_result)
+            st.session_state[saving_key] = False
         if result.get('prev'):
             st.session_state.x6_idx = max(0, st.session_state.x6_idx - 1)
             st.rerun()
@@ -946,13 +1404,18 @@ elif page == "Today's Workout":
             st.session_state.x6_idx = min(len(active)-1, st.session_state.x6_idx + 1)
             st.rerun()
         if result.get('finish'):
-            st.markdown(f"""
-            <div class="x6-card">
-              <div class="x6-label">Workout Complete Summary</div>
-              <div class="x6-ex-name">{day} complete</div>
-              <div class="x6-sub">Sets logged today: {completed_today} • Total volume: {total_volume_today:,} lbs • Next step: hydrate and log protein.</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.session_state[saving_key] = True
+            session_sets = list(pending_sets)
+            if not session_sets:
+                st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
+            else:
+                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_workout')
+                if save_result.get('supabase_ok'):
+                    render_cloud_save_success(save_result)
+                    clear_pending_sets(flow_key)
+                else:
+                    render_cloud_save_failure(save_result)
+            st.session_state[saving_key] = False
 
         nav1, nav2, nav3, nav4 = st.columns(4)
         with nav1:
@@ -967,16 +1430,30 @@ elif page == "Today's Workout":
             st.download_button("Export Log", LOG.read_bytes(), file_name="workout_log.csv", use_container_width=True, key="x6_export")
         with nav4:
             st.markdown('<div class="x6-finish">', unsafe_allow_html=True)
-            finish = st.button("🏁 Finish Workout", use_container_width=True, key="x6_finish")
+            finish = st.button("🏁 Finish Workout", use_container_width=True, key="x6_finish", disabled=is_saving)
             st.markdown('</div>', unsafe_allow_html=True)
         if finish:
-            st.markdown(f"""
-            <div class="x6-card">
-              <div class="x6-label">Workout Complete Summary</div>
-              <div class="x6-ex-name">{day} complete</div>
-              <div class="x6-sub">Sets logged today: {completed_today} • Total volume: {total_volume_today:,} lbs • Next step: hydrate and log protein.</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.session_state[saving_key] = True
+            session_sets = list(pending_sets)
+            if not session_sets:
+                st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
+            else:
+                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_button')
+                if save_result.get('supabase_ok'):
+                    render_cloud_save_success(save_result)
+                    render_session_summary(save_result, session_sets, flow_key=flow_key)
+                    clear_pending_sets(flow_key)
+                    st.session_state[f'{flow_key}_started_at'] = None
+                else:
+                    render_cloud_save_failure(save_result)
+            st.session_state[saving_key] = False
+
+        session_metrics = build_session_metrics(list(pending_sets), started_at=st.session_state.get(f'{flow_key}_started_at'))
+        m1, m2, m3 = st.columns(3)
+        m1.metric('Sets Completed', str(session_metrics.get('set_count', 0)))
+        m2.metric('Session Volume', f"{int(session_metrics.get('total_volume', 0)):,} lbs")
+        m3.metric('Session Duration', f"{int(session_metrics.get('duration_min', 0))} min")
+        render_rest_timer(flow_key)
 
         st.markdown("### Workout Flow")
         for idx, ex in active.iterrows():
@@ -993,6 +1470,14 @@ elif page == "Gym Mode":
     if active.empty:
         st.success("Recovery day. Mobility, walking, sauna, swimming, or rest.")
     else:
+        flow_key = 'gym'
+        session_id = make_workout_session_id(flow_key)
+        pending_sets = get_pending_sets(flow_key)
+        saving_key = f'{flow_key}_saving'
+        is_saving = bool(st.session_state.get(saving_key, False))
+        if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
+            st.session_state[f'{flow_key}_started_at'] = datetime.now()
+
         idx = st.number_input("Exercise number", min_value=1, max_value=len(active), value=1, step=1) - 1
         row = active.iloc[int(idx)]
         st.markdown(f'<div class="exercise-card"><div class="exercise-head"><div class="num">{idx+1}</div><div><div class="ex-title">{row.exercise}</div><span class="badge">Target: {row.target_sets} × {row.target_reps}</span><span class="badge green">{row.muscle_group}</span></div></div>', unsafe_allow_html=True)
@@ -1006,8 +1491,9 @@ elif page == "Gym Mode":
             idx=int(idx),
             total=len(active),
             photo_html=photo_html,
-            last_weight=float(row.base_weight),
-            best_weight=float(row.base_weight),
+            last_weight=get_recent_exercise_stats(load_log(), row.exercise)[0] or float(row.base_weight),
+            last_reps=get_recent_exercise_stats(load_log(), row.exercise)[1],
+            best_weight=get_recent_exercise_stats(load_log(), row.exercise)[2] or float(row.base_weight),
             sets=row.target_sets,
             reps_default=12,
             ai_cue="Coach: stay controlled and log every set.",
@@ -1018,16 +1504,91 @@ elif page == "Gym Mode":
             key_prefix="gym",
         )
         if result.get('complete'):
-            save_result = save_log([{'date':str(date.today()),'day':day,'exercise':row.exercise,'set_number':1,'weight_lbs':result.get('weight',0.0),'reps':result.get('reps',0),'rpe':result.get('rpe',0.0),'pain':result.get('body_feedback_score', result.get('pain',0)),'body_feedback_score':result.get('body_feedback_score', result.get('pain',0)),'notes':result.get('body_feedback_notes', result.get('notes','')),'body_feedback_notes':result.get('body_feedback_notes', result.get('notes','')),'volume':result.get('volume',0)}])
+            st.session_state[saving_key] = True
+            set_row = build_set_row(day=day, exercise=row.exercise, result=result, session_id=session_id)
+            single_set_result = save_completed_set(set_row)
+            save_result = {
+                'supabase_ok': bool(single_set_result.get('ok')),
+                'supabase_error': str(single_set_result.get('cloud_error', '') or ''),
+                'csv_ok': bool(single_set_result.get('csv_backup_ok', True)),
+                'csv_error': str(single_set_result.get('csv_backup_error', '') or ''),
+                'sets_attempted': int(single_set_result.get('sets_attempted', 1)),
+                'sets_inserted': int(single_set_result.get('sets_inserted', 0)),
+                'duplicates_skipped': int(single_set_result.get('duplicates_skipped', 0)),
+                'verified_rows': int(single_set_result.get('verified_rows', 0)),
+                'exercises_saved': 1,
+                'session_id': str(single_set_result.get('session_id', session_id)),
+                'session_id_supported': bool(single_set_result.get('session_id_supported', False)),
+                'session_id_used': bool(single_set_result.get('session_id_supported', False) and str(single_set_result.get('session_id', session_id))),
+                'already_saved': bool(single_set_result.get('already_saved', False)),
+                'status': str(single_set_result.get('status', '')),
+                'history_source': str(single_set_result.get('history_source', 'Supabase Cloud' if single_set_result.get('ok') else 'Local CSV Backup')),
+                'verified_cloud_row_count': int(single_set_result.get('after_count', 0)),
+            }
+            update_cloud_sync_state(
+                ok=bool(save_result.get('supabase_ok')),
+                message='Workout saved permanently' if bool(save_result.get('supabase_ok')) else 'Cloud save failed',
+                inserted=int(save_result.get('sets_inserted', 0)),
+                error=str(save_result.get('supabase_error', '')),
+            )
+            previous_debug = st.session_state.get('last_save_debug', {})
+            st.session_state['last_save_debug'] = {
+                'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'status': 'success' if bool(save_result.get('supabase_ok')) else 'error',
+                'error': str(save_result.get('supabase_error', '') or save_result.get('csv_error', '') or ''),
+                'last_saved_exercise': str(row.exercise),
+                'last_save_source': 'supabase' if bool(save_result.get('supabase_ok')) else 'backup_only',
+                'last_workout_session_id': str(save_result.get('session_id', session_id)),
+                'session_id_supported': bool(save_result.get('session_id_supported', False)),
+                'session_id_used': bool(save_result.get('session_id_used', False)),
+                'sets_attempted': int(save_result.get('sets_attempted', 1)),
+                'sets_inserted': int(save_result.get('sets_inserted', 0)),
+                'duplicates_skipped': int(save_result.get('duplicates_skipped', 0)),
+                'verified_rows': int(save_result.get('verified_rows', 0)),
+                'history_source': str(save_result.get('history_source', 'Supabase Cloud' if bool(save_result.get('supabase_ok')) else 'Local CSV Backup')),
+                'last_successful_sync_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if bool(save_result.get('supabase_ok')) else str(previous_debug.get('last_successful_sync_time', '')),
+                'save_source_label': 'gym_complete_set',
+                'workout': dict(set_row),
+            }
             if save_result.get('supabase_ok'):
-                st.success(str(save_result.get('supabase_message', 'Workout saved to Supabase and verified')))
+                pending_sets[:] = [
+                    s for s in pending_sets
+                    if not (
+                        str(s.get('exercise', '')).strip().lower() == str(set_row.get('exercise', '')).strip().lower()
+                        and int(float(s.get('set_number', 0) or 0)) == int(float(set_row.get('set_number', 0) or 0))
+                    )
+                ]
+                pending_sets.append(set_row)
+                timer_state = get_rest_timer_state(flow_key)
+                timer_state['remaining'] = int(timer_state.get('duration', 90))
+                timer_state['running'] = False
+                timer_state['started_at'] = None
+                timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                render_cloud_save_success(save_result)
             else:
-                st.error(str(save_result.get('supabase_error') or 'Unknown Supabase error'))
-            if not save_result.get('csv_ok'):
-                st.error(f"CSV backup failed: {save_result.get('csv_error')}")
-        st.markdown("### Rest Timer")
-        t = st.selectbox("Timer", [45,60,75,90,120], index=1, key="gym_timer")
-        st.info(f"Rest {t} seconds, then move to the next set/exercise.")
+                render_cloud_save_failure(save_result)
+            st.session_state[saving_key] = False
+        if result.get('finish'):
+            st.session_state[saving_key] = True
+            session_sets = list(pending_sets)
+            if not session_sets:
+                st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
+            else:
+                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='gym_finish_workout')
+                if save_result.get('supabase_ok'):
+                    render_cloud_save_success(save_result)
+                    render_session_summary(save_result, session_sets, flow_key=flow_key)
+                    clear_pending_sets(flow_key)
+                    st.session_state[f'{flow_key}_started_at'] = None
+                else:
+                    render_cloud_save_failure(save_result)
+            st.session_state[saving_key] = False
+        session_metrics = build_session_metrics(list(pending_sets), started_at=st.session_state.get(f'{flow_key}_started_at'))
+        s1, s2, s3 = st.columns(3)
+        s1.metric('Sets Completed', str(session_metrics.get('set_count', 0)))
+        s2.metric('Session Volume', f"{int(session_metrics.get('total_volume', 0)):,} lbs")
+        s3.metric('Session Duration', f"{int(session_metrics.get('duration_min', 0))} min")
+        render_rest_timer(flow_key)
         n1,n2=st.columns(2)
         with n1:
             if idx > 0: st.caption(f"Previous: {active.iloc[idx-1].exercise}")
@@ -1080,6 +1641,50 @@ elif page == "AI Coach":
 
     st.markdown('## Weekly Coaching Notes')
     st.markdown(f'<div class="side-card"><div class="side-title">Weekly Notes</div><div class="small">{brief.weekly_coaching_notes}</div><div class="small" style="margin-top:10px;"><b>Next Best Action:</b> {brief.next_best_action}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('## AI Training Recommendation')
+    if log.empty:
+        st.info('Not enough workout history yet. Complete more sets for progression recommendations.')
+    else:
+        recs = []
+        ai_df = log.copy()
+        for c in ['weight_lbs', 'reps', 'rpe', 'volume']:
+            if c in ai_df.columns:
+                ai_df[c] = pd.to_numeric(ai_df[c], errors='coerce').fillna(0)
+            else:
+                ai_df[c] = 0
+        ai_df['exercise'] = ai_df.get('exercise', pd.Series(dtype=str)).astype(str)
+        recent = ai_df.tail(120)
+
+        for ex, ex_df in recent.groupby('exercise'):
+            if not str(ex).strip() or ex_df.empty:
+                continue
+            last3 = ex_df.tail(3)
+            avg_reps = float(last3['reps'].mean())
+            avg_rpe = float(last3['rpe'].mean())
+            max_w = float(last3['weight_lbs'].max())
+            min_reps = float(last3['reps'].min())
+
+            if avg_reps >= 10 and avg_rpe <= 7.5:
+                increment = 5.0 if max_w >= 80 else 2.5
+                recs.append(f"{ex}: increase to {max_w + increment:.1f} lbs next session (stable reps + manageable RPE).")
+            elif avg_rpe >= 9 or min_reps <= 6:
+                recs.append(f"{ex}: reduce load by 5-10% or add recovery day (high RPE / falling reps).")
+            else:
+                recs.append(f"{ex}: hold weight, target cleaner reps before progression.")
+
+        weekly_volume = float(recent['volume'].tail(40).sum())
+        if weekly_volume > 15000:
+            recs.append('Recent training volume is high: prioritize recovery and sleep before adding load.')
+
+        if not recs:
+            st.info('Not enough stable exercise patterns yet for progression guidance.')
+        else:
+            st.markdown('<div class="side-card"><div class="side-title">AI Training Recommendation</div>', unsafe_allow_html=True)
+            for item in recs[:8]:
+                st.markdown(f"- {item}")
+            st.caption('Rule-based coaching from workout history. Not medical advice.')
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
 elif page == "Workout Builder":
@@ -1476,9 +2081,45 @@ elif page == "Progress Analytics":
         if log.empty:
             st.info('No workout history yet. Save workouts to unlock strength analytics.')
         else:
-            st.markdown('### Volume by Day')
+            st.markdown('### Weekly Workout Volume')
             daily = log.groupby('date', as_index=False)['volume'].sum().sort_values('date')
+            st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
             st.line_chart(daily.set_index('date')['volume'])
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('### Workout Frequency')
+            freq = log.groupby('date', as_index=False).size()
+            freq.columns = ['date', 'sessions']
+            st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+            st.bar_chart(freq.set_index('date')['sessions'])
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if 'exercise' in log.columns:
+                st.markdown('### Exercise Strength Trend')
+                top_ex = (
+                    log.groupby('exercise', as_index=False)['volume']
+                    .sum()
+                    .sort_values('volume', ascending=False)
+                    .head(1)
+                )
+                if not top_ex.empty:
+                    ex_name = str(top_ex.iloc[0]['exercise'])
+                    ex_df = log[log['exercise'].astype(str) == ex_name].copy()
+                    ex_df['estimated_1rm'] = pd.to_numeric(ex_df['weight_lbs'], errors='coerce').fillna(0) * (
+                        1 + (pd.to_numeric(ex_df['reps'], errors='coerce').fillna(0) / 30.0)
+                    )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown(f"Top exercise: {ex_name}")
+                        st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+                        st.line_chart(ex_df.groupby('date', as_index=False)['weight_lbs'].max().set_index('date')['weight_lbs'])
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    with c2:
+                        st.markdown('Estimated 1RM Trend')
+                        st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+                        st.line_chart(ex_df.groupby('date', as_index=False)['estimated_1rm'].max().set_index('date')['estimated_1rm'])
+                        st.markdown('</div>', unsafe_allow_html=True)
+
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown('### Personal Records')
@@ -1487,6 +2128,13 @@ elif page == "Progress Analytics":
                 st.markdown('### Top Exercises by Volume')
                 top = log.groupby('exercise', as_index=False)['volume'].sum().sort_values('volume', ascending=False).head(15)
                 st.bar_chart(top.set_index('exercise')['volume'])
+
+            if 'day' in log.columns:
+                st.markdown('### Muscle-Group Volume')
+                group_vol = log.groupby('day', as_index=False)['volume'].sum().sort_values('volume', ascending=False)
+                st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+                st.bar_chart(group_vol.set_index('day')['volume'])
+                st.markdown('</div>', unsafe_allow_html=True)
             st.markdown('### Coach Notes')
             st.markdown('<div class="side-card"><div class="side-title">Smart Progress Read</div><div class="small">If you complete all target reps with body feedback under 3/10 and RPE under 8, increase next week by 5 lb for upper-body machines or 2.5 lb for cable movements.</div></div>', unsafe_allow_html=True)
     with tab2:
@@ -1539,20 +2187,52 @@ elif page == "Exercise Library":
 elif page == "History":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
     log, source, cloud_error = load_log(return_meta=True)
+    if source == 'cloud':
+        st.caption('Source: Supabase Cloud')
+    else:
+        st.caption('Source: Local CSV Backup')
     if source == 'csv_fallback' and cloud_error:
         st.warning('Cloud unavailable')
     if source == 'csv_fallback_empty_cloud':
         st.info('Supabase returned no rows. Showing local CSV backup.')
-    if log.empty: st.info('No workouts saved yet.')
+    if log.empty:
+        st.info('No workouts saved yet.')
     else:
         display_log = log.copy()
         display_log['body_feedback_score'] = resolve_body_feedback_score(display_log)
         display_log['body_feedback_notes'] = resolve_body_feedback_notes(display_log)
-        preferred_cols = [
-            'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume'
-        ]
-        cols = [c for c in preferred_cols if c in display_log.columns]
-        st.dataframe(display_log.tail(200)[cols], use_container_width=True)
+        sessions = group_sessions(display_log)
+        for _, s in sessions.iterrows():
+            sid = str(s.get('session_key', ''))
+            session_rows = display_log.copy()
+            if 'workout_session_id' in session_rows.columns and sid:
+                session_rows = session_rows[session_rows['workout_session_id'].astype(str).str.strip() == sid]
+                if session_rows.empty:
+                    session_rows = display_log[(display_log['date'].astype(str) + '|' + display_log['day'].astype(str)) == sid]
+            st.markdown('<div class="history-session-card">', unsafe_allow_html=True)
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric('Date', str(s.get('date', '')))
+            h2.metric('Focus', str(s.get('focus', '')))
+            h3.metric('Exercises', str(int(s.get('exercises', 0))))
+            h4.metric('Sets', str(int(s.get('sets', 0))))
+            h5, h6, h7 = st.columns(3)
+            h5.metric('Total Volume', f"{int(float(s.get('total_volume', 0) or 0)):,} lbs")
+            h6.metric('Average RPE', f"{float(s.get('avg_rpe', 0) or 0):.1f}")
+            h7.metric('PR Count', str(int(s.get('pr_count', 0))))
+            with st.expander(f"Open session {sid[:36]}"):
+                preferred_cols = [
+                    'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume','workout_session_id'
+                ]
+                cols = [c for c in preferred_cols if c in session_rows.columns]
+                st.dataframe(session_rows[cols], use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with st.expander('Raw data view'):
+            preferred_cols = [
+                'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume','workout_session_id'
+            ]
+            cols = [c for c in preferred_cols if c in display_log.columns]
+            st.dataframe(display_log.tail(400)[cols], use_container_width=True)
 
 elif page == "Data Manager":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)
@@ -1581,6 +2261,13 @@ elif page == "Data Manager":
     status_label = 'Connected' if cloud_health.get('connected') else 'Disconnected'
     database_health = str(cloud_health.get('status', 'unavailable'))
     health_message = str(cloud_health.get('message', ''))
+    cloud_rows_export, cloud_error = get_workouts() if cloud_health.get('connected') else ([], 'not_connected')
+    normalized_cloud = normalize_cloud_workouts(cloud_rows_export) if cloud_health.get('connected') and not cloud_error else pd.DataFrame()
+    if not normalized_cloud.empty and 'workout_session_id' in normalized_cloud.columns:
+        sid_series = normalized_cloud['workout_session_id'].astype(str).str.strip()
+        supabase_session_count = int(sid_series[sid_series.ne('')].nunique())
+    else:
+        supabase_session_count = 0 if normalized_cloud.empty else int(normalized_cloud[['date', 'day']].drop_duplicates().shape[0])
 
     if cloud_health.get('connected'):
         st.success('Cloud database is connected and available.')
@@ -1589,12 +2276,21 @@ elif page == "Data Manager":
 
     last_sync = st.session_state.get('cloud_sync_status', {})
     last_sync_time = str(last_sync.get('timestamp', 'No sync attempts this session'))
+    last_service_result = get_last_save_result()
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric('Cloud Status', status_label)
-    c2.metric('Number of Workouts', str(cloud_rows) if cloud_health.get('connected') else 'N/A')
-    c3.metric('Last Sync Time', last_sync_time)
-    c4.metric('Database Health', database_health)
+    c2.metric('Supabase Row Count', str(cloud_rows) if cloud_health.get('connected') else 'N/A')
+    c3.metric('Supabase Session Count', str(supabase_session_count) if cloud_health.get('connected') else 'N/A')
+    c4.metric('Last Sync Time', last_sync_time)
+    c5.metric('Database Health', database_health)
+
+    local_csv_rows = len(load_log_local())
+    history_df, history_source, _ = load_log(return_meta=True)
+    h_source_label = 'Supabase Cloud' if history_source == 'cloud' else 'Local CSV Backup'
+    m1, m2 = st.columns(2)
+    m1.metric('Local CSV Row Count', str(local_csv_rows))
+    m2.metric('History Source', h_source_label)
 
     last_save_debug = st.session_state.get('last_save_debug', {})
     ls1, ls2, ls3, ls4 = st.columns(4)
@@ -1602,6 +2298,17 @@ elif page == "Data Manager":
     ls2.metric('Last Save Status', str(last_save_debug.get('status', 'unknown')))
     ls3.metric('Last Save Error', str(last_save_debug.get('error', '')) or 'None')
     ls4.metric('Last Saved Exercise', str(last_save_debug.get('last_saved_exercise', 'None')))
+
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
+    d1.metric('Last Save Source', str(last_save_debug.get('last_save_source', 'unknown')))
+    d2.metric('Last Workout Session ID', str(last_save_debug.get('last_workout_session_id', 'None')))
+    d3.metric('Sets Attempted', str(last_save_debug.get('sets_attempted', 0)))
+    d4.metric('Sets Inserted', str(last_save_debug.get('sets_inserted', 0)))
+    d5.metric('Duplicates Skipped', str(last_save_debug.get('duplicates_skipped', 0)))
+    d6.metric('Last Successful Sync Time', str(last_save_debug.get('last_successful_sync_time', 'None')))
+    session_schema_supported = bool(last_service_result.get('session_id_supported', last_save_debug.get('session_id_supported', False)))
+    session_schema_status = 'supported' if session_schema_supported else 'missing'
+    st.caption(f"Session ID column support: {session_schema_status}")
 
     if health_message:
         st.caption(health_message)
@@ -1628,41 +2335,51 @@ elif page == "Data Manager":
             })
 
     if cloud_health.get('connected'):
-        cloud_rows_export, cloud_error = get_workouts()
         if cloud_error:
             st.warning('Cloud unavailable')
         else:
-            export_df = normalize_cloud_workouts(cloud_rows_export)
+            export_df = normalized_cloud
             st.download_button(
                 'Export Workout History',
                 export_df.to_csv(index=False).encode('utf-8'),
                 file_name='workout_history_cloud.csv',
             )
 
-    st.markdown('### Validation Test')
-    if st.button('Run Test Save: Leg Curl 100 lbs x 10 reps x 1 set', use_container_width=True):
-        test_day = date.today().strftime('%A')
-        test_row = {
-            'date': str(date.today()),
-            'day': test_day,
-            'exercise': 'Leg Curl',
-            'set_number': 1,
-            'weight_lbs': 100,
-            'reps': 10,
-            'rpe': 8.0,
-            'pain': 0,
-            'body_feedback_score': 0,
-            'notes': 'Data Manager validation test',
-            'body_feedback_notes': 'Data Manager validation test',
-            'volume': 1000,
-        }
-        test_result = save_log([test_row])
-        if test_result.get('supabase_ok'):
-            st.success('Workout saved to Supabase and verified')
+    if st.button('Verify Latest Workout in Supabase', use_container_width=True):
+        if cloud_error:
+            st.error('Verification failed: cloud unavailable')
         else:
-            st.error(str(test_result.get('supabase_error') or 'Unknown Supabase error'))
-        if not test_result.get('csv_ok'):
-            st.error(f"CSV backup failed: {test_result.get('csv_error')}")
+            last_sid = str(last_save_debug.get('last_workout_session_id', '')).strip()
+            latest_ex = str(last_save_debug.get('last_saved_exercise', '')).strip().lower()
+            if normalized_cloud.empty:
+                st.warning('No cloud rows found to verify.')
+            else:
+                matched = normalized_cloud.copy()
+                if last_sid and 'workout_session_id' in matched.columns:
+                    matched = matched[matched['workout_session_id'].astype(str).str.strip() == last_sid]
+                if matched.empty and latest_ex:
+                    matched = normalized_cloud[normalized_cloud['exercise'].astype(str).str.strip().str.lower() == latest_ex]
+                if matched.empty:
+                    st.error('Latest workout not found in Supabase.')
+                else:
+                    st.success(f"Verified {len(matched)} row(s) in Supabase for the latest workout context.")
+
+    st.markdown('### Schema Migration')
+    st.caption('Run this in Supabase SQL Editor to add workout_session_id for duplicate-safe session saves:')
+    if cloud_health.get('connected') and not session_schema_supported:
+        st.warning('Current Supabase schema is missing workout_session_id. Session-level duplicate prevention is limited until migration is applied.')
+    st.code(
+        """alter table public.workouts
+add column if not exists workout_session_id text;
+
+create unique index if not exists workouts_unique_session_set
+on public.workouts (
+    workout_session_id,
+    exercise,
+    set_number
+);""",
+        language='sql',
+    )
 
     if LOG.exists():
         st.download_button('Export workout_log.csv', LOG.read_bytes(), file_name='workout_log.csv')

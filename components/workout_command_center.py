@@ -8,6 +8,7 @@ def workout_command_center(
     total,
     photo_html,
     last_weight,
+    last_reps,
     best_weight,
     sets,
     reps_default,
@@ -17,6 +18,7 @@ def workout_command_center(
     day,
     exercise_data=None,
     key_prefix="wcc",
+    disable_actions=False,
 ):
     """Render a premium Workout Command Center with Exercise Intelligence integration.
 
@@ -32,10 +34,12 @@ def workout_command_center(
         st.markdown(f'<div style="border-radius:12px;overflow:hidden;background:#0f1f34;padding:8px;">{photo_html}</div>', unsafe_allow_html=True)
         
         # Display metrics below image
-        m1, m2 = st.columns(2)
+        m1, m2, m3 = st.columns(3)
         with m1:
             st.markdown(f'<div style="background:#07111f;border-radius:8px;padding:10px;text-align:center;"><div style="color:#93c5fd;font-size:.75rem;font-weight:900;text-transform:uppercase;">Previous</div><div style="font-weight:900;font-size:1.3rem;">{last_weight:g}</div><div style="color:#93c5fd;font-size:.75rem;">lbs</div></div>', unsafe_allow_html=True)
         with m2:
+            st.markdown(f'<div style="background:#07111f;border-radius:8px;padding:10px;text-align:center;"><div style="color:#93c5fd;font-size:.75rem;font-weight:900;text-transform:uppercase;">Previous Reps</div><div style="font-weight:900;font-size:1.3rem;">{int(last_reps or 0)}</div><div style="color:#93c5fd;font-size:.75rem;">reps</div></div>', unsafe_allow_html=True)
+        with m3:
             st.markdown(f'<div style="background:#07111f;border-radius:8px;padding:10px;text-align:center;"><div style="color:#93c5fd;font-size:.75rem;font-weight:900;text-transform:uppercase;">Personal Record</div><div style="font-weight:900;font-size:1.3rem;">{best_weight:g}</div><div style="color:#93c5fd;font-size:.75rem;">lbs</div></div>', unsafe_allow_html=True)
     
     with right:
@@ -60,18 +64,28 @@ def workout_command_center(
     vol = int(weight * reps)
     st.markdown(f'<div style="background:#07111f;border-radius:12px;padding:12px;margin-bottom:12px;"><div style="color:#93c5fd;font-size:.85rem;">Current Set Volume</div><div style="font-size:1.8rem;font-weight:900;color:#22c55e;">{vol:,} lbs</div></div>', unsafe_allow_html=True)
 
-    complete = st.button("✅ COMPLETE SET", key=f"{key_prefix}_complete_{idx}", use_container_width=True)
+    complete = st.button(
+        "✅ COMPLETE SET",
+        key=f"{key_prefix}_complete_{idx}",
+        use_container_width=True,
+        disabled=bool(disable_actions),
+    )
     
     # Navigation buttons
     nav1, nav2, nav3, nav4 = st.columns(4)
     with nav1:
         prev_clicked = st.button("← Previous", key=f"{key_prefix}_prev_{idx}", disabled=(idx<=0), use_container_width=True)
     with nav2:
-        next_clicked = st.button("Next →", key=f"{key_prefix}_next_{idx}", disabled=(idx>=total-1), use_container_width=True)
+        next_clicked = st.button("➡ NEXT EXERCISE", key=f"{key_prefix}_next_{idx}", disabled=(idx>=total-1), use_container_width=True)
     with nav3:
         st.caption(f"Exercise {idx+1} of {total}")
     with nav4:
-        finish_clicked = st.button("🏁 Finish", key=f"{key_prefix}_finish_{idx}", use_container_width=True)
+        finish_clicked = st.button(
+            "🏁 Finish",
+            key=f"{key_prefix}_finish_{idx}",
+            use_container_width=True,
+            disabled=bool(disable_actions),
+        )
 
     # Progress
     st.markdown(f"**Progress:** {completed_today} sets logged • {total_volume_today:,} lbs")
