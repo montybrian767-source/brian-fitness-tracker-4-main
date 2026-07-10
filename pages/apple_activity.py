@@ -55,7 +55,7 @@ def render_apple_activity_page():
     st.markdown(
         '''
         <div class="apple-hero">
-          <div class="apple-kicker">Brian Fit 7.2 • X.16 Apple Activity Import</div>
+          <div class="apple-kicker">Brian Fit 7.3 • X.17 Recovery & Readiness Engine</div>
           <div class="apple-title">Apple Activity</div>
           <div class="apple-sub">Manual Apple Health import for ZIP exports or export.xml. This page does not connect to HealthKit directly.</div>
         </div>

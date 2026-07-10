@@ -27,15 +27,24 @@ from engines.muscle_recovery_engine import build_muscle_recovery_snapshot
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
+from engines.recovery_readiness_engine import (
+    calculate_daily_readiness,
+    estimate_recovery_impact_from_session,
+)
 from pages.apple_activity import render_apple_activity_page
+from pages.recovery_readiness import render_recovery_readiness_page
 from services.supabase_service import (
     get_workouts,
     health_check,
 )
 from services.apple_health_import_service import (
     get_apple_activity_daily,
+    get_daily_readiness_history,
+    get_recent_apple_activity,
+    get_recent_apple_workouts,
     get_apple_workouts,
     get_import_summary,
+    save_daily_readiness_result,
 )
 from services.workout_save_service import (
     build_workout_session_id,
@@ -319,6 +328,67 @@ def get_recent_exercise_stats(log_df: pd.DataFrame, exercise_name: str) -> tuple
     return last_weight, last_reps, best_weight
 
 
+def compute_shared_readiness(log_df: pd.DataFrame, target_dt: Optional[date] = None) -> dict:
+    target = target_dt or date.today()
+    cache_key = f'readiness_{target.isoformat()}'
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    apple_daily_recent, apple_daily_err = get_recent_apple_activity(days=35)
+    apple_workouts_recent, apple_workouts_err = get_recent_apple_workouts(days=35)
+
+    result = calculate_daily_readiness(
+        apple_daily_data=apple_daily_recent,
+        apple_workouts=apple_workouts_recent,
+        strength_workouts=log_df,
+        target_date=target,
+    )
+
+    history_df, history_err = get_daily_readiness_history(days=90)
+    save_info = save_daily_readiness_result(result, target)
+
+    payload = {
+        'target_date': str(target),
+        'result': result,
+        'history_df': history_df,
+        'apple_error': apple_daily_err,
+        'apple_workouts_error': apple_workouts_err,
+        'history_error': history_err,
+        'save_error': None if bool(save_info.get('ok')) else str(save_info.get('error', '')),
+    }
+    st.session_state[cache_key] = payload
+    st.session_state['shared_readiness_payload'] = payload
+    return payload
+
+
+def apply_readiness_to_next_workout(next_workout: dict, readiness_result: dict) -> dict:
+    plan = dict(next_workout or {})
+    exercises = [dict(x) for x in (plan.get('recommended_exercises') or [])]
+    recommendation = readiness_result.get('recommendation', {}) if isinstance(readiness_result, dict) else {}
+    primary = str(recommendation.get('primary_recommendation', 'Moderate Session'))
+
+    if primary == 'Recovery Day':
+        plan['focus'] = 'Recovery / Mobility'
+        plan['intensity'] = 'Lower'
+        plan['estimated_duration_min'] = min(45, max(20, int(plan.get('estimated_duration_min', 40) or 40)))
+        for ex in exercises:
+            ex['suggested_sets'] = max(1, int(ex.get('suggested_sets', 2)) - 1)
+            ex['suggested_starting_weight'] = round(float(ex.get('suggested_starting_weight', 0) or 0) * 0.85, 1)
+            ex['rest_seconds'] = max(75, int(ex.get('rest_seconds', 75)))
+    elif primary in {'Technique / Mobility', 'Moderate Session'}:
+        plan['intensity'] = 'Moderate'
+        plan['estimated_duration_min'] = min(60, max(35, int(plan.get('estimated_duration_min', 50) or 50)))
+        for ex in exercises:
+            ex['suggested_sets'] = max(2, int(ex.get('suggested_sets', 3)) - 1)
+            ex['suggested_starting_weight'] = round(float(ex.get('suggested_starting_weight', 0) or 0) * 0.93, 1)
+    elif primary == 'Train Heavy':
+        plan['intensity'] = 'High'
+
+    plan['recommended_exercises'] = exercises
+    return plan
+
+
 def get_mobile_primary_page() -> str:
     mapping = {
         'Dashboard': 'Dashboard',
@@ -328,6 +398,7 @@ def get_mobile_primary_page() -> str:
         'History': 'History',
         'Progress': 'Progress Analytics',
         'Apple Activity': 'Apple Activity',
+        'Recovery & Readiness': 'Recovery & Readiness',
         'More': 'More',
     }
 
@@ -343,6 +414,7 @@ def get_mobile_primary_page() -> str:
         "Today's Workout": 'Workout',
         'Progress Analytics': 'Progress',
         'Apple Activity': 'More',
+        'Recovery & Readiness': 'More',
     }
     current_mobile = reverse.get(current, current if current in mapping else 'Dashboard')
 
@@ -370,6 +442,7 @@ def get_mobile_primary_page() -> str:
             'Weekly Plan',
             'Weekly Coaching Report',
             'Apple Activity',
+            'Recovery & Readiness',
             'Recovery Center',
             'Nutrition',
             'Supplements',
@@ -610,6 +683,18 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
     c2.metric('Volume vs Previous', f"{volume_change:+,} lbs", f"{volume_change_pct:+.1f}%")
     c3.metric('Strength Trend', strength_trend)
     c4.metric('Recovery Impact', top_recovery_impact)
+
+    readiness_payload = st.session_state.get('shared_readiness_payload', {})
+    readiness_result = readiness_payload.get('result', {}) if isinstance(readiness_payload, dict) else {}
+    recovery_impact = estimate_recovery_impact_from_session(session_sets, readiness_result)
+    st.markdown('### Recovery Impact Estimate')
+    ri1, ri2, ri3 = st.columns(3)
+    ri1.metric('Session Load', str(recovery_impact.get('session_load', 'Moderate')))
+    ri2.metric('Recovery Window', str(recovery_impact.get('estimated_recovery_window', '24-48 hours')))
+    ri3.metric('Tomorrow Impact', str(recovery_impact.get('tomorrow_readiness_impact', 'Moderate')))
+    st.caption(f"Muscles affected: {', '.join(recovery_impact.get('muscle_groups_affected', []) or ['General'])}")
+    st.caption(f"Suggested next training day: {recovery_impact.get('suggested_next_training_day', str(date.today()))}")
+    st.caption(str(recovery_impact.get('note', 'Training estimate only. Not a medical claim.')))
 
     if prs:
         st.markdown('### NEW PERSONAL RECORD')
@@ -905,7 +990,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
         priorities.append('Maintain current progression plan and prioritize execution quality.')
 
     lines = [
-        'Brian Fit 7.2 Weekly Coaching Report',
+        'Brian Fit 7.3 Weekly Coaching Report',
         f'Workouts completed: {workouts_completed}',
         f'Weekly volume: {weekly_volume:,} lbs',
         f'Muscle groups trained: {", ".join(muscles_trained) if muscles_trained else "N/A"}',
@@ -918,7 +1003,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
     ] + [f'- {p}' for p in priorities]
     text_report = '\n'.join(lines)
 
-    html_report = '<h2>Brian Fit 7.2 Weekly Coaching Report</h2>'
+    html_report = '<h2>Brian Fit 7.3 Weekly Coaching Report</h2>'
     html_report += f'<p><b>Workouts completed:</b> {workouts_completed}<br><b>Weekly volume:</b> {weekly_volume:,} lbs<br><b>Muscle groups trained:</b> {", ".join(muscles_trained) if muscles_trained else "N/A"}<br><b>PRs achieved:</b> {prs_achieved}<br><b>Consistency score:</b> {consistency_score}/100</p>'
     html_report += f'<p><b>Strongest progress:</b> {", ".join(strongest_progress) if strongest_progress else "None detected"}<br><b>Exercises stalled:</b> {", ".join(stalled) if stalled else "None detected"}<br><b>Recovery summary:</b> {recovery_summary}</p>'
     html_report += '<h3>Suggested priorities for next week</h3><ul>' + ''.join([f'<li>{p}</li>' for p in priorities]) + '</ul>'
@@ -1394,9 +1479,9 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
-nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 7.2")
-st.sidebar.caption("X.16 Apple Activity Import")
+nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
+st.sidebar.markdown("## 🏋️ Brian Fit 7.3")
+st.sidebar.caption("X.17 Recovery & Readiness Engine")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 page = get_mobile_primary_page()
@@ -1404,6 +1489,9 @@ st.session_state['main_nav'] = page
 
 workouts = load_workouts()
 log = load_log()
+shared_readiness_payload = compute_shared_readiness(log)
+shared_readiness_result = shared_readiness_payload.get('result', {}) if isinstance(shared_readiness_payload, dict) else {}
+shared_readiness_history = shared_readiness_payload.get('history_df', pd.DataFrame()) if isinstance(shared_readiness_payload, dict) else pd.DataFrame()
 days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 
 if page == "Dashboard":
@@ -1431,11 +1519,9 @@ if page == "Dashboard":
         body_df=body_df,
     )
 
-    recovery_latest = get_latest_recovery(RECOVERY)
-    if recovery_latest:
-        recovery_score = int(pd.to_numeric(pd.Series([recovery_latest.get('recovery_pct', 72)]), errors='coerce').fillna(72).iloc[0])
-    else:
-        recovery_score = 72
+    readiness_result = shared_readiness_result if isinstance(shared_readiness_result, dict) else {}
+    recovery_score = int(readiness_result.get('readiness_score', 72) or 72)
+    readiness_status = str(readiness_result.get('recovery_status', 'Moderate'))
 
     log_view = log.copy()
     if not log_view.empty and 'date' in log_view.columns:
@@ -1458,7 +1544,8 @@ if page == "Dashboard":
     workout_grade = compute_workout_grade(log)
     rec_card = recovery_recommendation(recovery_score, workout_grade, muscle_snapshot)
 
-    readiness_status = 'Ready' if recovery_score >= 85 else ('Moderate' if recovery_score >= 70 else 'Recovery Focus')
+    if not readiness_status:
+        readiness_status = 'Ready' if recovery_score >= 85 else ('Moderate' if recovery_score >= 70 else 'Recovery Focus')
     muscles = muscle_snapshot.get('muscles', {})
 
     def _muscle_pct(name: str) -> float:
@@ -1482,7 +1569,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-        <div class="x-kicker">Brian Fit 7.2 • X.16 Apple Activity Import</div>
+                <div class="x-kicker">Brian Fit 7.3 • X.17 Recovery & Readiness Engine</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -1536,6 +1623,22 @@ if page == "Dashboard":
         """,
         unsafe_allow_html=True,
     )
+
+    st.markdown('### Daily Readiness')
+    dr1, dr2, dr3, dr4 = st.columns(4)
+    dr1.metric('Score', str(int(readiness_result.get('readiness_score', recovery_score) or recovery_score)))
+    dr2.metric('Status', str(readiness_result.get('recovery_status', readiness_status)))
+    rec_primary = (readiness_result.get('recommendation', {}) or {}).get('primary_recommendation', 'Moderate Session')
+    dr3.metric('Recommendation', str(rec_primary))
+    dr4.metric('Last Workout Load', f"{int(readiness_result.get('last_workout_load', 0) or 0):,}")
+
+    rr1, rr2, rr3 = st.columns(3)
+    rr1.metric('Sleep', f"{str(readiness_result.get('activity_context', {}).get('sleep_hours', 'N/A'))} hr")
+    rr2.metric('HRV', f"{str(readiness_result.get('activity_context', {}).get('heart_rate_variability_ms', 'N/A'))} ms")
+    rr3.metric('Resting HR', f"{str(readiness_result.get('activity_context', {}).get('resting_heart_rate', 'N/A'))} bpm")
+    if st.button('View Recovery Details', use_container_width=True, key='dashboard_view_recovery_details'):
+        st.session_state['main_nav'] = 'Recovery & Readiness'
+        st.rerun()
 
     st.markdown('### Progress Snapshot')
     chart_c1, chart_c2, chart_c3 = st.columns(3)
@@ -1633,6 +1736,8 @@ elif page == "AI Personal Trainer":
         body_df=body_df,
     )
     next_workout = generate_next_workout(cloud_log, workouts, recovery_snapshot=recovery_snapshot)
+    readiness_result = shared_readiness_result if isinstance(shared_readiness_result, dict) else {}
+    next_workout = apply_readiness_to_next_workout(next_workout, readiness_result)
     weekly_report = build_weekly_coaching_report(cloud_log, workouts, recovery_snapshot, progression, plateau)
 
     today_s = str(date.today())
@@ -1646,7 +1751,7 @@ elif page == "AI Personal Trainer":
 
     rec_exercises = next_workout.get('recommended_exercises', []) or []
     muscles_df = pd.DataFrame(recovery_snapshot.get('muscles', {}).values())
-    avg_recovery = int(muscles_df['recovery_pct'].mean()) if not muscles_df.empty and 'recovery_pct' in muscles_df.columns else 0
+    avg_recovery = int(readiness_result.get('readiness_score', 0) or 0)
 
     latest_apple = {}
     if not apple_daily_df.empty and 'activity_date' in apple_daily_df.columns:
@@ -1667,18 +1772,8 @@ elif page == "AI Personal Trainer":
         if not apple_workouts_df.empty:
             apple_recent_workout = str(apple_workouts_df.iloc[-1].get('workout_type', ''))
 
-    apple_adjustment = 0
-    if apple_sleep_hours and apple_sleep_hours < 6.5:
-        apple_adjustment -= 8
-    if apple_steps >= 12000 and apple_exercise_minutes >= 45:
-        apple_adjustment -= 5
-    if apple_active_energy >= 900:
-        apple_adjustment -= 4
-    if apple_stand_hours >= 10 and apple_exercise_minutes >= 60:
-        apple_adjustment -= 3
-
-    adjusted_recovery = max(0, min(100, avg_recovery + apple_adjustment))
-    readiness_status = 'Ready' if adjusted_recovery >= 78 else ('Moderate' if adjusted_recovery >= 60 else ('Recovering' if adjusted_recovery >= 40 else 'Fatigued'))
+    adjusted_recovery = int(readiness_result.get('readiness_score', avg_recovery) or avg_recovery)
+    readiness_status = str(readiness_result.get('recovery_status', 'Moderate'))
 
     recent_14 = cloud_log.copy()
     if not recent_14.empty:
@@ -1694,14 +1789,14 @@ elif page == "AI Personal Trainer":
         training_confidence = max(35, training_confidence - 20)
     elif avg_recent_rpe >= 8.5:
         training_confidence = max(40, training_confidence - 10)
-    if apple_adjustment < 0:
-        training_confidence = max(35, training_confidence + apple_adjustment)
+    if readiness_result.get('confidence_score') is not None:
+        training_confidence = int(max(30, min(96, (training_confidence * 0.45) + (float(readiness_result.get('confidence_score', 0)) * 0.55))))
 
     st.markdown('<div class="ai-coach-shell">', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="ai-hero">
-          <div class="ai-kicker">Brian Fit 7.2 • X.16 Apple Activity Import</div>
+                    <div class="ai-kicker">Brian Fit 7.3 • X.17 Recovery & Readiness Engine</div>
           <div class="ai-greet">Good Morning Brian</div>
           <div class="ai-sub">Recovery score {adjusted_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
         </div>
@@ -1739,6 +1834,23 @@ elif page == "AI Personal Trainer":
         st.caption('Training estimate based on imported Apple Health and Brian Fit history. Not a medical assessment.')
         if apple_recent_workout:
             st.markdown(f"<div class='ai-card'><div class='ai-card-title'>Recent Apple Workout</div><div class='small'>{apple_recent_workout}</div></div>", unsafe_allow_html=True)
+
+    st.markdown('### Readiness Impact on Today\'s Plan')
+    readiness_reco = readiness_result.get('recommendation', {}) if isinstance(readiness_result, dict) else {}
+    st.markdown(
+        f"""
+        <div class="ai-card">
+            <div class="ai-card-title">Readiness Impact on Today's Plan</div>
+            <div class="small"><b>Primary:</b> {readiness_reco.get('primary_recommendation', 'Moderate Session')}</div>
+            <div class="small" style="margin-top:6px;"><b>Intensity:</b> {readiness_reco.get('recommended_intensity_percentage', '65-78%')} • <b>RPE ceiling:</b> {readiness_reco.get('suggested_rpe_ceiling', '7.0')}</div>
+            <div class="small" style="margin-top:6px;"><b>Volume adjustment:</b> {readiness_reco.get('suggested_volume_adjustment', 'Reduce total volume by 20%')}</div>
+            <div class="small" style="margin-top:6px;"><b>Duration:</b> {readiness_reco.get('suggested_duration', '45-55 minutes')}</div>
+            <div class="small" style="margin-top:6px;"><b>Focus guidance:</b> {readiness_reco.get('coaching_reason', 'Use conservative progression based on available recovery signals.')}</div>
+            <div class="small" style="margin-top:8px;">Training estimate based on Brian Fit and imported Apple Health data. Not a medical assessment.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     reason_line = str(next_workout.get('coaching_note', '')).strip()
     first_reason = ''
@@ -1974,7 +2086,7 @@ elif page == "AI Personal Trainer":
         st.session_state['main_nav'] = "Today's Workout"
         st.rerun()
     if mobile_actions[1].button('View Recovery', use_container_width=True, key='ai71_mobile_recovery'):
-        st.session_state['main_nav'] = 'Recovery Center'
+        st.session_state['main_nav'] = 'Recovery & Readiness'
         st.rerun()
     if mobile_actions[2].button('View Progress', use_container_width=True, key='ai71_mobile_progress'):
         st.session_state['main_nav'] = 'Progress Analytics'
@@ -2420,7 +2532,7 @@ elif page == "AI Coach":
 
 
 elif page == "Weekly Coaching Report":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.2</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.3</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
     log_week = load_log()
     workouts_week = load_workouts()
     progression_week = analyze_progressive_overload(log_week, workouts_week)
@@ -2776,6 +2888,12 @@ elif page == "Smart Scale":
 
     importlib.reload(smart_scale_page)
     smart_scale_page.render_smart_scale_import_page(BODY)
+
+elif page == "Recovery & Readiness":
+    render_recovery_readiness_page(
+        readiness_result=shared_readiness_result,
+        readiness_history_df=shared_readiness_history,
+    )
 
 elif page == "Recovery Center":
     render_recovery_center(

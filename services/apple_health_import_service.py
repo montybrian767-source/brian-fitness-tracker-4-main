@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import zipfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import xml.etree.ElementTree as ET
@@ -53,6 +53,24 @@ APPLE_WORKOUT_COLUMNS = [
     'device',
     'metadata',
     'imported_at',
+]
+
+DAILY_READINESS_COLUMNS = [
+    'readiness_date',
+    'readiness_score',
+    'recovery_status',
+    'confidence_score',
+    'sleep_score',
+    'hrv_score',
+    'resting_hr_score',
+    'activity_load_score',
+    'strength_load_score',
+    'recovery_balance_score',
+    'recommendation',
+    'limiting_factors',
+    'positive_factors',
+    'data_quality',
+    'calculated_at',
 ]
 
 LAST_IMPORT_STATE_KEY = 'apple_health_last_import_result'
@@ -624,6 +642,98 @@ def get_apple_workouts() -> Tuple[pd.DataFrame, Optional[str]]:
         return pd.DataFrame(response.data or [], columns=APPLE_WORKOUT_COLUMNS), None
     except Exception as exc:
         return pd.DataFrame(columns=APPLE_WORKOUT_COLUMNS), str(exc)
+
+
+def get_apple_daily_for_date(target_date: Any) -> Tuple[pd.DataFrame, Optional[str]]:
+    parsed = pd.to_datetime(target_date, errors='coerce')
+    if pd.isna(parsed):
+        return pd.DataFrame(columns=APPLE_ACTIVITY_COLUMNS), 'Invalid target date.'
+
+    client, err = connect_supabase()
+    if err:
+        return pd.DataFrame(columns=APPLE_ACTIVITY_COLUMNS), str(err)
+
+    day = parsed.date().isoformat()
+    try:
+        response = client.table('apple_activity_daily').select('*').eq('activity_date', day).order('activity_date', desc=False).execute()
+        return pd.DataFrame(response.data or [], columns=APPLE_ACTIVITY_COLUMNS), None
+    except Exception as exc:
+        return pd.DataFrame(columns=APPLE_ACTIVITY_COLUMNS), str(exc)
+
+
+def get_recent_apple_activity(days: int = 28) -> Tuple[pd.DataFrame, Optional[str]]:
+    client, err = connect_supabase()
+    if err:
+        return pd.DataFrame(columns=APPLE_ACTIVITY_COLUMNS), str(err)
+
+    cutoff = (date.today() - timedelta(days=max(1, int(days)) - 1)).isoformat()
+    try:
+        response = client.table('apple_activity_daily').select('*').gte('activity_date', cutoff).order('activity_date', desc=False).execute()
+        return pd.DataFrame(response.data or [], columns=APPLE_ACTIVITY_COLUMNS), None
+    except Exception as exc:
+        return pd.DataFrame(columns=APPLE_ACTIVITY_COLUMNS), str(exc)
+
+
+def get_recent_apple_workouts(days: int = 28) -> Tuple[pd.DataFrame, Optional[str]]:
+    client, err = connect_supabase()
+    if err:
+        return pd.DataFrame(columns=APPLE_WORKOUT_COLUMNS), str(err)
+
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)) - 1)).isoformat()
+    try:
+        response = client.table('apple_workouts').select('*').gte('start_time', cutoff_ts).order('start_time', desc=False).execute()
+        return pd.DataFrame(response.data or [], columns=APPLE_WORKOUT_COLUMNS), None
+    except Exception as exc:
+        return pd.DataFrame(columns=APPLE_WORKOUT_COLUMNS), str(exc)
+
+
+def save_daily_readiness_result(readiness_result: Dict[str, Any], readiness_date: Any) -> Dict[str, Any]:
+    parsed = pd.to_datetime(readiness_date, errors='coerce')
+    if pd.isna(parsed):
+        return {'ok': False, 'error': 'Invalid readiness date.'}
+
+    client, err = connect_supabase()
+    if err:
+        return {'ok': False, 'error': str(err)}
+
+    target_day = parsed.date().isoformat()
+    payload = {
+        'readiness_date': target_day,
+        'readiness_score': readiness_result.get('readiness_score'),
+        'recovery_status': readiness_result.get('recovery_status'),
+        'confidence_score': readiness_result.get('confidence_score'),
+        'sleep_score': readiness_result.get('sleep_score'),
+        'hrv_score': readiness_result.get('hrv_score'),
+        'resting_hr_score': readiness_result.get('resting_hr_score'),
+        'activity_load_score': readiness_result.get('activity_load_score'),
+        'strength_load_score': readiness_result.get('strength_load_score'),
+        'recovery_balance_score': readiness_result.get('recovery_balance_score'),
+        'recommendation': readiness_result.get('recommendation'),
+        'limiting_factors': readiness_result.get('limiting_factors'),
+        'positive_factors': readiness_result.get('positive_factors'),
+        'data_quality': readiness_result.get('data_quality'),
+        'calculated_at': datetime.now(timezone.utc).isoformat(),
+    }
+
+    payload = _clean_payload(payload, DAILY_READINESS_COLUMNS)
+    try:
+        client.table('daily_readiness').upsert(payload, on_conflict='readiness_date').execute()
+        return {'ok': True, 'error': None}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+
+
+def get_daily_readiness_history(days: int = 60) -> Tuple[pd.DataFrame, Optional[str]]:
+    client, err = connect_supabase()
+    if err:
+        return pd.DataFrame(columns=DAILY_READINESS_COLUMNS), str(err)
+
+    cutoff = (date.today() - timedelta(days=max(1, int(days)) - 1)).isoformat()
+    try:
+        response = client.table('daily_readiness').select('*').gte('readiness_date', cutoff).order('readiness_date', desc=False).execute()
+        return pd.DataFrame(response.data or [], columns=DAILY_READINESS_COLUMNS), None
+    except Exception as exc:
+        return pd.DataFrame(columns=DAILY_READINESS_COLUMNS), str(exc)
 
 
 def get_import_summary() -> Dict[str, Any]:
