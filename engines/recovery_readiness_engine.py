@@ -42,12 +42,28 @@ def _to_numeric(series: pd.Series) -> pd.Series:
 
 
 def _to_date(target_date: Any) -> date:
+    if isinstance(target_date, datetime):
+        return target_date.date()
     if isinstance(target_date, date):
         return target_date
     parsed = pd.to_datetime(target_date, errors='coerce')
     if pd.isna(parsed):
         return date.today()
     return parsed.date()
+
+
+def to_utc_series(series):
+    return pd.to_datetime(series, errors='coerce', utc=True)
+
+
+def to_utc_day_bounds(value):
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+    start = ts.normalize()
+    return start, start + pd.Timedelta(days=1)
 
 
 def _normalize_apple_daily(df: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -68,7 +84,7 @@ def _normalize_apple_daily(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     for col in required:
         if col not in base.columns:
             base[col] = pd.NA
-    base['activity_date'] = pd.to_datetime(base['activity_date'], errors='coerce')
+    base['activity_date'] = to_utc_series(base['activity_date']).dt.normalize()
     base = base.dropna(subset=['activity_date']).sort_values('activity_date')
     for col in required:
         if col != 'activity_date':
@@ -80,6 +96,7 @@ def _normalize_apple_workouts(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     base = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
     required = [
         'start_time',
+        'end_time',
         'duration_minutes',
         'total_energy_kcal',
         'average_heart_rate',
@@ -89,7 +106,9 @@ def _normalize_apple_workouts(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     for col in required:
         if col not in base.columns:
             base[col] = pd.NA
-    base['start_time'] = pd.to_datetime(base['start_time'], errors='coerce')
+    base['start_time'] = to_utc_series(base['start_time'])
+    if 'end_time' in base.columns:
+        base['end_time'] = to_utc_series(base['end_time'])
     base = base.dropna(subset=['start_time']).sort_values('start_time')
     for col in ['duration_minutes', 'total_energy_kcal', 'average_heart_rate', 'maximum_heart_rate']:
         base[col] = _to_numeric(base[col])
@@ -118,7 +137,15 @@ def _normalize_strength_workouts(df: Optional[pd.DataFrame]) -> pd.DataFrame:
 def _latest_row_on_or_before(df: pd.DataFrame, date_col: str, target: date) -> Optional[pd.Series]:
     if df.empty:
         return None
-    cutoff = pd.Timestamp(target)
+    if date_col not in df.columns:
+        return None
+
+    series = df[date_col]
+    if pd.api.types.is_datetime64tz_dtype(series):
+        cutoff, _ = to_utc_day_bounds(target)
+    else:
+        cutoff = pd.Timestamp(target)
+
     filtered = df[df[date_col] <= cutoff]
     if filtered.empty:
         return None
@@ -145,14 +172,15 @@ def calculate_personal_baselines(
     target_date: Any,
 ) -> Dict[str, Any]:
     target = _to_date(target_date)
+    target_start, _ = to_utc_day_bounds(target_date)
     apple = _normalize_apple_daily(apple_daily_data)
     strength = _normalize_strength_workouts(strength_workouts)
 
-    apple_window = apple[apple['activity_date'] <= pd.Timestamp(target)].copy()
+    apple_window = apple[apple['activity_date'] <= target_start].copy()
     strength_window = strength[strength['date'] <= pd.Timestamp(target)].copy()
 
-    recent7 = apple_window[apple_window['activity_date'] >= (pd.Timestamp(target) - pd.Timedelta(days=6))]
-    base28 = apple_window[apple_window['activity_date'] >= (pd.Timestamp(target) - pd.Timedelta(days=27))]
+    recent7 = apple_window[apple_window['activity_date'] >= (target_start - pd.Timedelta(days=6))]
+    base28 = apple_window[apple_window['activity_date'] >= (target_start - pd.Timedelta(days=27))]
 
     strength_7 = strength_window[strength_window['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=6))]
     strength_28 = strength_window[strength_window['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=27))]
@@ -300,67 +328,77 @@ def calculate_activity_load_score(
     target_date: Any,
     baselines: Dict[str, Any],
 ) -> Dict[str, Any]:
-    target = _to_date(target_date)
-    daily = _normalize_apple_daily(apple_daily_data)
-    workouts = _normalize_apple_workouts(apple_workouts)
+    try:
+        target = _to_date(target_date)
+        day_start, day_end = to_utc_day_bounds(target_date)
+        daily = _normalize_apple_daily(apple_daily_data)
+        workouts = _normalize_apple_workouts(apple_workouts)
 
-    latest_daily = _latest_row_on_or_before(daily, 'activity_date', target)
-    if latest_daily is None and workouts.empty:
-        return {'available': False, 'score': None, 'reason': 'Apple activity load data missing.'}
+        if 'start_time' in workouts.columns:
+            workouts['start_time'] = to_utc_series(workouts['start_time'])
+            workouts = workouts.dropna(subset=['start_time'])
 
-    base = baselines.get('baseline_28', {})
-    base_steps = base.get('steps')
-    base_energy = base.get('active_energy_kcal')
-    base_minutes = base.get('exercise_minutes')
+        latest_daily = _latest_row_on_or_before(daily, 'activity_date', target)
+        if latest_daily is None and workouts.empty:
+            return {'available': False, 'score': None, 'reason': 'Apple activity load data missing.'}
 
-    day_score = 70.0
-    details = []
+        base = baselines.get('baseline_28', {})
+        base_steps = base.get('steps')
+        base_energy = base.get('active_energy_kcal')
+        base_minutes = base.get('exercise_minutes')
 
-    if latest_daily is not None:
-        steps = float(latest_daily.get('steps') or 0.0)
-        energy = float(latest_daily.get('active_energy_kcal') or 0.0)
-        minutes = float(latest_daily.get('exercise_minutes') or 0.0)
-        avg_hr = float(latest_daily.get('average_heart_rate') or 0.0)
+        day_score = 70.0
+        details = []
 
-        if base_steps and base_steps > 0:
-            step_ratio = steps / float(base_steps)
-            day_score += (1.0 - min(1.7, step_ratio)) * 6.0
-        if base_energy and base_energy > 0:
-            energy_ratio = energy / float(base_energy)
-            day_score += (1.0 - min(1.8, energy_ratio)) * 8.0
-        if base_minutes and base_minutes > 0:
-            min_ratio = minutes / float(base_minutes)
-            day_score += (1.0 - min(1.8, min_ratio)) * 8.0
+        if latest_daily is not None:
+            steps = float(latest_daily.get('steps') or 0.0)
+            energy = float(latest_daily.get('active_energy_kcal') or 0.0)
+            minutes = float(latest_daily.get('exercise_minutes') or 0.0)
+            avg_hr = float(latest_daily.get('average_heart_rate') or 0.0)
 
-        if avg_hr >= 150:
-            day_score -= 5.0
-        elif 0 < avg_hr <= 120:
-            day_score += 2.0
+            if base_steps and base_steps > 0:
+                step_ratio = steps / float(base_steps)
+                day_score += (1.0 - min(1.7, step_ratio)) * 6.0
+            if base_energy and base_energy > 0:
+                energy_ratio = energy / float(base_energy)
+                day_score += (1.0 - min(1.8, energy_ratio)) * 8.0
+            if base_minutes and base_minutes > 0:
+                min_ratio = minutes / float(base_minutes)
+                day_score += (1.0 - min(1.8, min_ratio)) * 8.0
 
-        details.append(f'Steps {int(steps):,}, active calories {int(energy):,}, exercise minutes {int(minutes)}.')
+            if avg_hr >= 150:
+                day_score -= 5.0
+            elif 0 < avg_hr <= 120:
+                day_score += 2.0
 
-    day_start = pd.Timestamp(target)
-    day_end = day_start + pd.Timedelta(days=1)
-    day_workouts = workouts[(workouts['start_time'] >= day_start) & (workouts['start_time'] < day_end)]
+            details.append(f'Steps {int(steps):,}, active calories {int(energy):,}, exercise minutes {int(minutes)}.')
 
-    if not day_workouts.empty:
-        total_duration = float(day_workouts['duration_minutes'].fillna(0).sum())
-        total_energy = float(day_workouts['total_energy_kcal'].fillna(0).sum())
-        max_hr = float(day_workouts['maximum_heart_rate'].fillna(0).max())
+        day_workouts = workouts[(workouts['start_time'] >= day_start) & (workouts['start_time'] < day_end)]
 
-        workout_load_index = (total_duration / 60.0) + (total_energy / 600.0)
-        if max_hr > 0:
-            workout_load_index += max(0.0, (max_hr - 145.0) / 25.0)
+        if not day_workouts.empty:
+            total_duration = float(day_workouts['duration_minutes'].fillna(0).sum())
+            total_energy = float(day_workouts['total_energy_kcal'].fillna(0).sum())
+            max_hr = float(day_workouts['maximum_heart_rate'].fillna(0).max())
 
-        day_score -= min(16.0, workout_load_index * 7.5)
-        details.append(f'Apple workouts duration {int(total_duration)} min and calories {int(total_energy)} kcal.')
+            workout_load_index = (total_duration / 60.0) + (total_energy / 600.0)
+            if max_hr > 0:
+                workout_load_index += max(0.0, (max_hr - 145.0) / 25.0)
 
-    day_score = _clamp(day_score)
-    return {
-        'available': True,
-        'score': day_score,
-        'reason': ' '.join(details) if details else 'Activity load available with partial signals.',
-    }
+            day_score -= min(16.0, workout_load_index * 7.5)
+            details.append(f'Apple workouts duration {int(total_duration)} min and calories {int(total_energy)} kcal.')
+
+        day_score = _clamp(day_score)
+        return {
+            'available': True,
+            'score': day_score,
+            'reason': ' '.join(details) if details else 'Activity load available with partial signals.',
+        }
+    except Exception:
+        return {
+            'available': False,
+            'score': None,
+            'reason': 'Apple activity load unavailable due to timestamp parsing issues. Limited-data readiness applied.',
+        }
 
 
 def _strength_daily_aggregate(strength: pd.DataFrame) -> pd.DataFrame:
@@ -726,188 +764,263 @@ def calculate_daily_readiness(
     strength_workouts: Optional[pd.DataFrame],
     target_date: Any,
 ) -> Dict[str, Any]:
-    target = _to_date(target_date)
-    apple_daily = _normalize_apple_daily(apple_daily_data)
-    apple_w = _normalize_apple_workouts(apple_workouts)
-    strength = _normalize_strength_workouts(strength_workouts)
+    try:
+        target = _to_date(target_date)
+        apple_daily = _normalize_apple_daily(apple_daily_data)
+        apple_w = _normalize_apple_workouts(apple_workouts)
+        strength = _normalize_strength_workouts(strength_workouts)
 
-    baselines = calculate_personal_baselines(apple_daily, strength, target)
+        baselines = calculate_personal_baselines(apple_daily, strength, target_date)
 
-    latest_daily = _latest_row_on_or_before(apple_daily, 'activity_date', target)
+        latest_daily = _latest_row_on_or_before(apple_daily, 'activity_date', target)
 
-    sleep_score_obj = calculate_sleep_score(
-        current_sleep=float(latest_daily.get('sleep_hours')) if latest_daily is not None and not pd.isna(latest_daily.get('sleep_hours')) else None,
-        baseline_sleep=baselines.get('baseline_28', {}).get('sleep_hours'),
-        days_of_history=int(baselines.get('days_of_apple_data', 0)),
-    )
-    hrv_score_obj = calculate_hrv_score(
-        current_hrv=float(latest_daily.get('heart_rate_variability_ms')) if latest_daily is not None and not pd.isna(latest_daily.get('heart_rate_variability_ms')) else None,
-        baseline_hrv=baselines.get('baseline_28', {}).get('heart_rate_variability_ms'),
-        days_of_history=int(baselines.get('days_of_apple_data', 0)),
-    )
-    resting_hr_score_obj = calculate_resting_hr_score(
-        current_rhr=float(latest_daily.get('resting_heart_rate')) if latest_daily is not None and not pd.isna(latest_daily.get('resting_heart_rate')) else None,
-        baseline_rhr=baselines.get('baseline_28', {}).get('resting_heart_rate'),
-        days_of_history=int(baselines.get('days_of_apple_data', 0)),
-    )
+        sleep_score_obj = calculate_sleep_score(
+            current_sleep=float(latest_daily.get('sleep_hours')) if latest_daily is not None and not pd.isna(latest_daily.get('sleep_hours')) else None,
+            baseline_sleep=baselines.get('baseline_28', {}).get('sleep_hours'),
+            days_of_history=int(baselines.get('days_of_apple_data', 0)),
+        )
+        hrv_score_obj = calculate_hrv_score(
+            current_hrv=float(latest_daily.get('heart_rate_variability_ms')) if latest_daily is not None and not pd.isna(latest_daily.get('heart_rate_variability_ms')) else None,
+            baseline_hrv=baselines.get('baseline_28', {}).get('heart_rate_variability_ms'),
+            days_of_history=int(baselines.get('days_of_apple_data', 0)),
+        )
+        resting_hr_score_obj = calculate_resting_hr_score(
+            current_rhr=float(latest_daily.get('resting_heart_rate')) if latest_daily is not None and not pd.isna(latest_daily.get('resting_heart_rate')) else None,
+            baseline_rhr=baselines.get('baseline_28', {}).get('resting_heart_rate'),
+            days_of_history=int(baselines.get('days_of_apple_data', 0)),
+        )
 
-    activity_load_obj = calculate_activity_load_score(
-        apple_daily_data=apple_daily,
-        apple_workouts=apple_w,
-        target_date=target,
-        baselines=baselines,
-    )
-    strength_load_obj = calculate_strength_load_score(
-        strength_workouts=strength,
-        target_date=target,
-        baselines=baselines,
-    )
-    recovery_balance_obj = calculate_recovery_balance(
-        strength_workouts=strength,
-        target_date=target,
-    )
+        activity_load_obj = calculate_activity_load_score(
+            apple_daily_data=apple_daily,
+            apple_workouts=apple_w,
+            target_date=target_date,
+            baselines=baselines,
+        )
+        strength_load_obj = calculate_strength_load_score(
+            strength_workouts=strength,
+            target_date=target,
+            baselines=baselines,
+        )
+        recovery_balance_obj = calculate_recovery_balance(
+            strength_workouts=strength,
+            target_date=target,
+        )
 
-    component_objs = {
-        'sleep_score': sleep_score_obj,
-        'hrv_score': hrv_score_obj,
-        'resting_hr_score': resting_hr_score_obj,
-        'activity_load_score': activity_load_obj,
-        'strength_load_score': strength_load_obj,
-        'recovery_balance_score': recovery_balance_obj,
-    }
+        component_objs = {
+            'sleep_score': sleep_score_obj,
+            'hrv_score': hrv_score_obj,
+            'resting_hr_score': resting_hr_score_obj,
+            'activity_load_score': activity_load_obj,
+            'strength_load_score': strength_load_obj,
+            'recovery_balance_score': recovery_balance_obj,
+        }
 
-    base_weights = {
-        'sleep_score': 0.25,
-        'hrv_score': 0.20,
-        'resting_hr_score': 0.15,
-        'activity_load_score': 0.10,
-        'strength_load_score': 0.20,
-        'recovery_balance_score': 0.10,
-    }
+        base_weights = {
+            'sleep_score': 0.25,
+            'hrv_score': 0.20,
+            'resting_hr_score': 0.15,
+            'activity_load_score': 0.10,
+            'strength_load_score': 0.20,
+            'recovery_balance_score': 0.10,
+        }
 
-    available_keys = [k for k, v in component_objs.items() if bool(v.get('available')) and v.get('score') is not None]
-    weight_sum = sum(base_weights[k] for k in available_keys)
+        available_keys = [k for k, v in component_objs.items() if bool(v.get('available')) and v.get('score') is not None]
+        weight_sum = sum(base_weights[k] for k in available_keys)
 
-    redistributed_weights: Dict[str, float] = {}
-    for key in base_weights:
-        redistributed_weights[key] = (base_weights[key] / weight_sum) if key in available_keys and weight_sum > 0 else 0.0
+        redistributed_weights: Dict[str, float] = {}
+        for key in base_weights:
+            redistributed_weights[key] = (base_weights[key] / weight_sum) if key in available_keys and weight_sum > 0 else 0.0
 
-    if weight_sum > 0:
-        readiness_score = sum((float(component_objs[k]['score']) * redistributed_weights[k]) for k in available_keys)
-    else:
-        readiness_score = 50.0
+        if weight_sum > 0:
+            readiness_score = sum((float(component_objs[k]['score']) * redistributed_weights[k]) for k in available_keys)
+        else:
+            readiness_score = 50.0
 
-    readiness_score = _clamp(readiness_score)
-    recovery_status = _status_from_score(readiness_score)
+        readiness_score = _clamp(readiness_score)
+        recovery_status = _status_from_score(readiness_score)
 
-    strength_details = strength_load_obj.get('details', {}) if strength_load_obj else {}
-    muscle_cards = build_muscle_recovery_cards(strength, apple_daily, target)
+        strength_details = strength_load_obj.get('details', {}) if strength_load_obj else {}
+        muscle_cards = build_muscle_recovery_cards(strength, apple_daily, target)
 
-    component_scores = {k: (float(v['score']) if v.get('score') is not None else None) for k, v in component_objs.items()}
-    recommendation = build_readiness_recommendation(
-        readiness_score=readiness_score,
-        recovery_status=recovery_status,
-        component_scores=component_scores,
-        muscle_cards=muscle_cards,
-        strength_details=strength_details,
-    )
+        component_scores = {k: (float(v['score']) if v.get('score') is not None else None) for k, v in component_objs.items()}
+        recommendation = build_readiness_recommendation(
+            readiness_score=readiness_score,
+            recovery_status=recovery_status,
+            component_scores=component_scores,
+            muscle_cards=muscle_cards,
+            strength_details=strength_details,
+        )
 
-    positives: List[str] = []
-    limiting: List[str] = []
-    for key, obj in component_objs.items():
-        score = obj.get('score')
-        if score is None:
-            continue
-        label = _metric_label(key)
-        reason = str(obj.get('reason', '')).strip()
-        if float(score) >= 72:
-            positives.append(f'{label}: {reason}')
-        elif float(score) <= 58:
-            limiting.append(f'{label}: {reason}')
+        positives: List[str] = []
+        limiting: List[str] = []
+        for key, obj in component_objs.items():
+            score = obj.get('score')
+            if score is None:
+                continue
+            label = _metric_label(key)
+            reason = str(obj.get('reason', '')).strip()
+            if float(score) >= 72:
+                positives.append(f'{label}: {reason}')
+            elif float(score) <= 58:
+                limiting.append(f'{label}: {reason}')
 
-    if not positives:
-        positives.append('No strong positive signals today.')
-    if not limiting:
-        limiting.append('No major limiting factor detected from available data.')
+        if not positives:
+            positives.append('No strong positive signals today.')
+        if not limiting:
+            limiting.append('No major limiting factor detected from available data.')
 
-    apple_days = int(baselines.get('days_of_apple_data', 0))
-    strength_days = int(baselines.get('days_of_strength_data', 0))
+        apple_days = int(baselines.get('days_of_apple_data', 0))
+        strength_days = int(baselines.get('days_of_strength_data', 0))
 
-    key_missing = [k for k in ['sleep_score', 'hrv_score', 'resting_hr_score'] if component_scores.get(k) is None]
-    missing_inputs = [
-        _metric_label(k) for k in key_missing
-    ]
+        key_missing = [k for k in ['sleep_score', 'hrv_score', 'resting_hr_score'] if component_scores.get(k) is None]
+        missing_inputs = [
+            _metric_label(k) for k in key_missing
+        ]
 
-    confidence = 42.0
-    confidence += min(18.0, apple_days * 0.9)
-    confidence += min(16.0, strength_days * 0.7)
-    confidence += len(available_keys) * 3.0
-    if key_missing:
-        confidence -= min(20.0, len(key_missing) * 7.0)
-    if apple_days < 7:
-        confidence -= 10.0
-    confidence_score = _clamp(confidence)
+        confidence = 42.0
+        confidence += min(18.0, apple_days * 0.9)
+        confidence += min(16.0, strength_days * 0.7)
+        confidence += len(available_keys) * 3.0
+        if key_missing:
+            confidence -= min(20.0, len(key_missing) * 7.0)
+        if apple_days < 7:
+            confidence -= 10.0
+        confidence_score = _clamp(confidence)
 
-    data_quality = {
-        'apple_data_days_available': apple_days,
-        'sleep_coverage': round(float(baselines.get('coverage', {}).get('sleep', 0.0)) * 100.0, 1),
-        'hrv_coverage': round(float(baselines.get('coverage', {}).get('hrv', 0.0)) * 100.0, 1),
-        'resting_hr_coverage': round(float(baselines.get('coverage', {}).get('resting_hr', 0.0)) * 100.0, 1),
-        'strength_history_days': strength_days,
-        'readiness_confidence': round(confidence_score, 1),
-        'confidence_label': _coarse_confidence_label(confidence_score),
-        'missing_inputs': missing_inputs,
-        'limited_history': bool(apple_days < 7 or strength_days < 7),
-        'history_notes': list(baselines.get('history_notes', [])),
-    }
+        data_quality = {
+            'apple_data_days_available': apple_days,
+            'sleep_coverage': round(float(baselines.get('coverage', {}).get('sleep', 0.0)) * 100.0, 1),
+            'hrv_coverage': round(float(baselines.get('coverage', {}).get('hrv', 0.0)) * 100.0, 1),
+            'resting_hr_coverage': round(float(baselines.get('coverage', {}).get('resting_hr', 0.0)) * 100.0, 1),
+            'strength_history_days': strength_days,
+            'readiness_confidence': round(confidence_score, 1),
+            'confidence_label': _coarse_confidence_label(confidence_score),
+            'missing_inputs': missing_inputs,
+            'limited_history': bool(apple_days < 7 or strength_days < 7),
+            'history_notes': list(baselines.get('history_notes', [])),
+        }
 
-    source_dates = {
-        **_build_apple_source_dates(apple_daily, apple_w),
-        **_build_strength_source_dates(strength),
-        'target_date': str(target),
-    }
+        source_dates = {
+            **_build_apple_source_dates(apple_daily, apple_w),
+            **_build_strength_source_dates(strength),
+            'target_date': str(target),
+        }
 
-    last_strength_load = float(strength_details.get('recent_volume_3') or 0.0)
+        last_strength_load = float(strength_details.get('recent_volume_3') or 0.0)
 
-    today_row = _latest_row_on_or_before(apple_daily, 'activity_date', target)
+        today_row = _latest_row_on_or_before(apple_daily, 'activity_date', target)
 
-    result = {
-        'readiness_score': int(round(readiness_score)),
-        'recovery_status': recovery_status,
-        'confidence_score': round(confidence_score, 1),
-        'sleep_score': round(component_scores['sleep_score'], 1) if component_scores['sleep_score'] is not None else None,
-        'hrv_score': round(component_scores['hrv_score'], 1) if component_scores['hrv_score'] is not None else None,
-        'resting_hr_score': round(component_scores['resting_hr_score'], 1) if component_scores['resting_hr_score'] is not None else None,
-        'activity_load_score': round(component_scores['activity_load_score'], 1) if component_scores['activity_load_score'] is not None else None,
-        'strength_load_score': round(component_scores['strength_load_score'], 1) if component_scores['strength_load_score'] is not None else None,
-        'recovery_balance_score': round(component_scores['recovery_balance_score'], 1) if component_scores['recovery_balance_score'] is not None else None,
-        'recommendation': recommendation,
-        'limiting_factors': limiting,
-        'positive_factors': positives,
-        'data_quality': data_quality,
-        'source_dates': source_dates,
-        'weight_distribution': redistributed_weights,
-        'component_reasons': {k: str(v.get('reason', '')) for k, v in component_objs.items()},
-        'last_updated': datetime.now().isoformat(timespec='seconds'),
-        'data_sources_used': [
-            source
-            for source, used in [
-                ('Brian Fit strength history', not strength.empty),
-                ('Apple activity daily', not apple_daily.empty),
-                ('Apple workouts', not apple_w.empty),
-            ]
-            if used
-        ],
-        'muscle_recovery_cards': muscle_cards,
-        'activity_context': {
-            'sleep_hours': float(today_row.get('sleep_hours')) if today_row is not None and not pd.isna(today_row.get('sleep_hours')) else None,
-            'resting_heart_rate': float(today_row.get('resting_heart_rate')) if today_row is not None and not pd.isna(today_row.get('resting_heart_rate')) else None,
-            'heart_rate_variability_ms': float(today_row.get('heart_rate_variability_ms')) if today_row is not None and not pd.isna(today_row.get('heart_rate_variability_ms')) else None,
-        },
-        'last_workout_load': int(round(last_strength_load)),
-    }
+        result = {
+            'readiness_score': int(round(readiness_score)),
+            'recovery_status': recovery_status,
+            'confidence_score': round(confidence_score, 1),
+            'sleep_score': round(component_scores['sleep_score'], 1) if component_scores['sleep_score'] is not None else None,
+            'hrv_score': round(component_scores['hrv_score'], 1) if component_scores['hrv_score'] is not None else None,
+            'resting_hr_score': round(component_scores['resting_hr_score'], 1) if component_scores['resting_hr_score'] is not None else None,
+            'activity_load_score': round(component_scores['activity_load_score'], 1) if component_scores['activity_load_score'] is not None else None,
+            'strength_load_score': round(component_scores['strength_load_score'], 1) if component_scores['strength_load_score'] is not None else None,
+            'recovery_balance_score': round(component_scores['recovery_balance_score'], 1) if component_scores['recovery_balance_score'] is not None else None,
+            'recommendation': recommendation,
+            'limiting_factors': limiting,
+            'positive_factors': positives,
+            'data_quality': data_quality,
+            'source_dates': source_dates,
+            'weight_distribution': redistributed_weights,
+            'component_reasons': {k: str(v.get('reason', '')) for k, v in component_objs.items()},
+            'last_updated': datetime.now().isoformat(timespec='seconds'),
+            'data_sources_used': [
+                source
+                for source, used in [
+                    ('Brian Fit strength history', not strength.empty),
+                    ('Apple activity daily', not apple_daily.empty),
+                    ('Apple workouts', not apple_w.empty),
+                ]
+                if used
+            ],
+            'muscle_recovery_cards': muscle_cards,
+            'activity_context': {
+                'sleep_hours': float(today_row.get('sleep_hours')) if today_row is not None and not pd.isna(today_row.get('sleep_hours')) else None,
+                'resting_heart_rate': float(today_row.get('resting_heart_rate')) if today_row is not None and not pd.isna(today_row.get('resting_heart_rate')) else None,
+                'heart_rate_variability_ms': float(today_row.get('heart_rate_variability_ms')) if today_row is not None and not pd.isna(today_row.get('heart_rate_variability_ms')) else None,
+            },
+            'last_workout_load': int(round(last_strength_load)),
+        }
 
-    return result
+        return result
+    except Exception as exc:
+        # Keep dashboard/recovery pages up even if upstream timestamps are malformed.
+        return {
+            'readiness_score': 50,
+            'recovery_status': 'Moderate',
+            'confidence_score': 30.0,
+            'sleep_score': None,
+            'hrv_score': None,
+            'resting_hr_score': None,
+            'activity_load_score': None,
+            'strength_load_score': None,
+            'recovery_balance_score': None,
+            'recommendation': {
+                'primary_recommendation': 'Moderate Session',
+                'recommended_intensity_percentage': '65-75%',
+                'suggested_duration': '35-50 minutes',
+                'suggested_volume_adjustment': 'Reduce volume by 20%',
+                'suggested_rpe_ceiling': '7.0',
+                'recommended_muscle_groups': ['Core', 'Mobility'],
+                'reduce_or_avoid_muscle_groups': [],
+                'hydration_note': 'Target 80-120 oz water based on session duration and sweat rate.',
+                'sleep_target': '7.5-9.0 hours',
+                'coaching_reason': 'Limited data mode: timestamp parsing failed on one or more Apple inputs.',
+                'readiness_impact': 'Fallback recommendation used due to data quality issues.',
+            },
+            'limiting_factors': ['Limited data mode enabled due to timestamp parsing errors.'],
+            'positive_factors': ['Dashboard remained available with fallback readiness output.'],
+            'data_quality': {
+                'apple_data_days_available': 0,
+                'sleep_coverage': 0.0,
+                'hrv_coverage': 0.0,
+                'resting_hr_coverage': 0.0,
+                'strength_history_days': 0,
+                'readiness_confidence': 30.0,
+                'confidence_label': 'Limited data',
+                'missing_inputs': ['Sleep', 'HRV', 'Resting HR'],
+                'limited_history': True,
+                'history_notes': [f'Limited-data fallback: {str(exc)}'],
+            },
+            'source_dates': {
+                'latest_apple_activity_date': None,
+                'apple_days_used': 0,
+                'latest_apple_workout_start': None,
+                'apple_workouts_used': 0,
+                'latest_strength_date': None,
+                'strength_days_used': 0,
+                'target_date': str(_to_date(target_date)),
+            },
+            'weight_distribution': {
+                'sleep_score': 0.0,
+                'hrv_score': 0.0,
+                'resting_hr_score': 0.0,
+                'activity_load_score': 0.0,
+                'strength_load_score': 0.0,
+                'recovery_balance_score': 0.0,
+            },
+            'component_reasons': {
+                'sleep_score': 'Unavailable in fallback mode.',
+                'hrv_score': 'Unavailable in fallback mode.',
+                'resting_hr_score': 'Unavailable in fallback mode.',
+                'activity_load_score': 'Unavailable in fallback mode.',
+                'strength_load_score': 'Unavailable in fallback mode.',
+                'recovery_balance_score': 'Unavailable in fallback mode.',
+            },
+            'last_updated': datetime.now().isoformat(timespec='seconds'),
+            'data_sources_used': [],
+            'muscle_recovery_cards': [],
+            'activity_context': {
+                'sleep_hours': None,
+                'resting_heart_rate': None,
+                'heart_rate_variability_ms': None,
+            },
+            'last_workout_load': 0,
+        }
 
 
 def estimate_recovery_impact_from_session(
