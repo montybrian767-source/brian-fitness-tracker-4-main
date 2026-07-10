@@ -8,6 +8,8 @@ import streamlit as st
 from components.exercise_detail_panel import render_exercise_detail_panel
 from engines.exercise_intelligence import ExerciseIntelligence
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot
+from engines.progressive_overload_engine import analyze_progressive_overload
+from engines.plateau_detection_engine import detect_plateaus
 
 
 _PAGE_CSS = """
@@ -57,7 +59,68 @@ def _filtered_library(library_df: pd.DataFrame, search: str, muscle_filter: str,
     return filtered.reset_index(drop=True)
 
 
-def render_exercise_library_page(assets_dir: Path):
+def _exercise_snapshot(log_df: pd.DataFrame, exercise_name: str, progression: dict, plateau: dict) -> dict:
+    payload = {
+        "last_performance": "No history",
+        "personal_best": "No history",
+        "estimated_1rm": "N/A",
+        "weight_trend": "stable",
+        "rep_trend": "stable",
+        "volume_trend": "stable",
+        "recent_sessions": pd.DataFrame(),
+        "progression": "Hold Weight",
+        "suggested_next_weight": "N/A",
+        "suggested_rep_range": "8-12",
+        "plateau_status": "No plateau signal",
+    }
+
+    if log_df is None or log_df.empty:
+        return payload
+
+    ex = log_df[log_df["exercise"].astype(str).str.lower() == str(exercise_name).lower()].copy()
+    if ex.empty:
+        return payload
+
+    ex["date"] = pd.to_datetime(ex["date"], errors="coerce")
+    ex = ex.dropna(subset=["date"]).sort_values("date")
+    for col in ["weight_lbs", "reps", "volume"]:
+        ex[col] = pd.to_numeric(ex.get(col, 0), errors="coerce").fillna(0)
+    ex["estimated_1rm"] = ex["weight_lbs"] * (1 + (ex["reps"] / 30.0))
+
+    last = ex.iloc[-1]
+    best = ex.loc[ex["weight_lbs"].idxmax()] if not ex.empty else last
+
+    payload["last_performance"] = f"{str(pd.Timestamp(last['date']).date())} • {float(last['weight_lbs']):.1f} lbs x {int(last['reps'])}"
+    payload["personal_best"] = f"{float(best['weight_lbs']):.1f} lbs"
+    payload["estimated_1rm"] = f"{float(ex['estimated_1rm'].max()):.1f} lbs"
+    payload["recent_sessions"] = ex.tail(8)[["date", "weight_lbs", "reps", "volume", "estimated_1rm"]].copy()
+    payload["recent_sessions"]["date"] = payload["recent_sessions"]["date"].dt.date.astype(str)
+
+    if len(ex) >= 4:
+        w0 = float(ex.head(2)["weight_lbs"].mean())
+        w1 = float(ex.tail(2)["weight_lbs"].mean())
+        r0 = float(ex.head(2)["reps"].mean())
+        r1 = float(ex.tail(2)["reps"].mean())
+        v0 = float(ex.head(2)["volume"].mean())
+        v1 = float(ex.tail(2)["volume"].mean())
+        payload["weight_trend"] = "up" if w1 > (w0 * 1.02) else ("down" if w1 < (w0 * 0.98) else "stable")
+        payload["rep_trend"] = "up" if r1 > (r0 * 1.05) else ("down" if r1 < (r0 * 0.95) else "stable")
+        payload["volume_trend"] = "up" if v1 > (v0 * 1.05) else ("down" if v1 < (v0 * 0.95) else "stable")
+
+    p_item = (progression or {}).get("by_exercise", {}).get(exercise_name)
+    if p_item:
+        payload["progression"] = str(p_item.get("suggested_action", "Hold Weight"))
+        payload["suggested_next_weight"] = f"{float(p_item.get('suggested_weight', 0) or 0):.1f} lbs"
+        payload["suggested_rep_range"] = str(p_item.get("suggested_rep_range", "8-12"))
+
+    pl_item = (plateau or {}).get("by_exercise", {}).get(exercise_name)
+    if pl_item and bool(pl_item.get("possible_plateau")):
+        payload["plateau_status"] = f"Possible Plateau • {pl_item.get('likely_reason', '')}"
+
+    return payload
+
+
+def render_exercise_library_page(assets_dir: Path, workout_log_df: pd.DataFrame | None = None):
     st.markdown(_PAGE_CSS, unsafe_allow_html=True)
 
     intel = ExerciseIntelligence()
@@ -108,9 +171,35 @@ def render_exercise_library_page(assets_dir: Path):
     st.markdown('</div>', unsafe_allow_html=True)
 
     profile = intel.get_profile(st.session_state.exercise_library_selected)
+    source_log = workout_log_df if workout_log_df is not None else _safe_read_csv(_DATA_DIR / "workout_log.csv")
+    progression = analyze_progressive_overload(source_log, library_df)
+    plateau = detect_plateaus(source_log)
+    coach = _exercise_snapshot(source_log, st.session_state.exercise_library_selected, progression, plateau)
+
     muscle_snapshot = build_muscle_readiness_snapshot(
-        workout_log_df=_safe_read_csv(_DATA_DIR / "workout_log.csv"),
+        workout_log_df=source_log,
         recovery_df=_safe_read_csv(_DATA_DIR / "recovery_log.csv"),
         body_df=_safe_read_csv(_DATA_DIR / "body_stats.csv"),
     )
     render_exercise_detail_panel(profile, assets_dir, muscle_snapshot)
+
+    st.markdown("### Exercise Intelligence")
+    i1, i2, i3, i4 = st.columns(4)
+    i1.metric("Last Performance", coach["last_performance"])
+    i2.metric("Personal Best", coach["personal_best"])
+    i3.metric("Estimated 1RM", coach["estimated_1rm"])
+    i4.metric("AI Progression", coach["progression"])
+
+    st.caption(f"Primary muscle: {profile.get('primary_muscles', ['Unknown'])[0] if profile.get('primary_muscles') else 'Unknown'}")
+    st.caption(f"Secondary muscles: {', '.join(profile.get('secondary_muscles', []) or ['N/A'])}")
+    st.caption(f"Plateau status: {coach['plateau_status']}")
+    st.caption(f"Suggested next weight: {coach['suggested_next_weight']} • Suggested rep range: {coach['suggested_rep_range']}")
+    st.caption(f"Weight trend: {coach['weight_trend']} • Rep trend: {coach['rep_trend']} • Volume trend: {coach['volume_trend']}")
+
+    recent_sessions = coach.get("recent_sessions", pd.DataFrame())
+    if recent_sessions is not None and not recent_sessions.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.line_chart(recent_sessions.set_index("date")["weight_lbs"])
+        c2.line_chart(recent_sessions.set_index("date")["reps"])
+        c3.line_chart(recent_sessions.set_index("date")["volume"])
+        st.dataframe(recent_sessions, use_container_width=True)

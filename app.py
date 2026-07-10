@@ -1,6 +1,7 @@
 
 from pathlib import Path
 from datetime import date, datetime
+from typing import Optional
 import base64
 import pandas as pd
 import streamlit as st
@@ -19,6 +20,10 @@ from components.body_composition_summary import body_composition_summary
 from engines.exercise_intelligence import ExerciseIntelligence
 from engines.body_intelligence import BodyIntelligence
 from engines.ai_coach_engine import build_daily_brief
+from engines.progressive_overload_engine import analyze_progressive_overload
+from engines.workout_recommendation_engine import generate_next_workout
+from engines.plateau_detection_engine import detect_plateaus
+from engines.muscle_recovery_engine import build_muscle_recovery_snapshot
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
@@ -311,6 +316,7 @@ def get_recent_exercise_stats(log_df: pd.DataFrame, exercise_name: str) -> tuple
 def get_mobile_primary_page() -> str:
     mapping = {
         'Dashboard': 'Dashboard',
+        'AI Personal Trainer': 'AI Personal Trainer',
         'Workout': "Today's Workout",
         'Gym Mode': 'Gym Mode',
         'History': 'History',
@@ -320,6 +326,10 @@ def get_mobile_primary_page() -> str:
 
     if 'mobile_more_active' not in st.session_state:
         st.session_state['mobile_more_active'] = False
+
+    forced_mobile_target = st.session_state.get('mobile_nav_override')
+    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More']:
+        st.session_state['mobile_primary_nav'] = forced_mobile_target
 
     current = str(st.session_state.get('main_nav', 'Dashboard'))
     reverse = {
@@ -331,13 +341,18 @@ def get_mobile_primary_page() -> str:
     st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
     selected = st.radio(
         'Mobile Primary Navigation',
-        ['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'],
+        ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'],
         horizontal=True,
         key='mobile_primary_nav',
-        index=['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
+        index=['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
         label_visibility='collapsed',
     )
     st.markdown('</div>', unsafe_allow_html=True)
+
+    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] and selected != forced_mobile_target:
+        selected = forced_mobile_target
+    if 'mobile_nav_override' in st.session_state:
+        st.session_state.pop('mobile_nav_override', None)
 
     if selected == 'More':
         st.session_state['mobile_more_active'] = True
@@ -345,6 +360,7 @@ def get_mobile_primary_page() -> str:
             'AI Coach',
             'Workout Builder',
             'Weekly Plan',
+            'Weekly Coaching Report',
             'Recovery Center',
             'Nutrition',
             'Supplements',
@@ -510,6 +526,54 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
     metrics = build_session_metrics(session_sets, started_at=started_at)
     historical = load_log()
     prs = detect_session_prs(historical, session_sets)
+    workouts_df = load_workouts()
+
+    all_rows = pd.DataFrame(session_sets or [])
+    session_day = str(all_rows.iloc[0].get('day', '')) if not all_rows.empty else ''
+    session_id = str(save_result.get('session_id', ''))
+
+    prev_volume = 0
+    if historical is not None and not historical.empty and session_day:
+        hist = historical.copy()
+        hist['date'] = pd.to_datetime(hist['date'], errors='coerce')
+        hist = hist.dropna(subset=['date'])
+        hist['volume'] = pd.to_numeric(hist.get('volume', 0), errors='coerce').fillna(0)
+        prior = hist[hist['day'].astype(str) == session_day]
+        if not prior.empty:
+            if 'workout_session_id' in prior.columns:
+                sid = prior['workout_session_id'].astype(str).str.strip()
+                if sid.eq('').all():
+                    previous_sessions = prior.groupby(prior['date'].dt.date, as_index=False)['volume'].sum().sort_values('date')
+                else:
+                    previous_sessions = prior.groupby(sid, as_index=False).agg(date=('date', 'max'), volume=('volume', 'sum')).sort_values('date')
+            else:
+                previous_sessions = prior.groupby(prior['date'].dt.date, as_index=False)['volume'].sum().sort_values('date')
+            if not previous_sessions.empty:
+                prev_volume = int(float(previous_sessions.iloc[-1]['volume']))
+
+    volume_change = int(metrics['total_volume'] - prev_volume)
+    volume_change_pct = 0.0 if prev_volume <= 0 else (volume_change / prev_volume) * 100.0
+
+    tmp_hist = historical.copy() if historical is not None else pd.DataFrame()
+    if not all_rows.empty:
+        tmp_hist = pd.concat([tmp_hist, all_rows], ignore_index=True)
+    grade = compute_workout_grade(tmp_hist)
+    progression = analyze_progressive_overload(tmp_hist, workouts_df)
+    plateau = detect_plateaus(tmp_hist)
+    recovery_snapshot = build_muscle_recovery_snapshot(
+        recovery_df=read_csv_safe(RECOVERY, RECOVERY_COLUMNS),
+        workout_log_df=tmp_hist,
+        body_df=read_csv_safe(BODY, BODY_COLUMNS),
+    )
+    next_workout = generate_next_workout(tmp_hist, workouts_df, recovery_snapshot=recovery_snapshot)
+
+    strength_trend = 'Stable'
+    if progression.get('recommendations'):
+        improving = len([p for p in progression['recommendations'] if str(p.get('performance_trend')) == 'improving'])
+        declining = len([p for p in progression['recommendations'] if str(p.get('performance_trend')) == 'declining'])
+        strength_trend = 'Improving' if improving > declining else ('Declining' if declining > improving else 'Stable')
+
+    top_recovery_impact = ', '.join([str(x.get('muscle', '')).title() for x in recovery_snapshot.get('top_fatigued', [])[:3]]) or 'None'
 
     st.markdown('<div class="session-summary">', unsafe_allow_html=True)
     st.success('Workout saved permanently')
@@ -532,13 +596,35 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
     b3.metric('Estimated Calories', str(metrics['estimated_calories']))
     b4.metric('PRs', str(len(prs)))
 
-    if prs:
-        st.markdown('### New Personal Record')
-        for p in prs[:6]:
-            st.markdown(f"- {p['exercise']}: {p['record']} ({p['previous']} -> {p['new']}, +{p['improvement']})")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Workout Grade', f"{grade.label}", f"{grade.overall_score:.1f}/100")
+    c2.metric('Volume vs Previous', f"{volume_change:+,} lbs", f"{volume_change_pct:+.1f}%")
+    c3.metric('Strength Trend', strength_trend)
+    c4.metric('Recovery Impact', top_recovery_impact)
 
-    st.caption('Comparison with previous workout: based on recent cloud history for the same exercise patterns.')
-    st.caption('Suggested next workout: progress weight by 2.5-5 lbs where reps were completed with manageable RPE.')
+    if prs:
+        st.markdown('### NEW PERSONAL RECORD')
+        for p in prs[:6]:
+            st.markdown(
+                f"- {p['exercise']} | {p['record']} | New: {p['new']} | Previous: {p['previous']} | Improvement: +{p['improvement']} | Date: {str(date.today())} | Session: {session_id or 'N/A'}"
+            )
+
+    st.markdown('### Recommended Next Workout')
+    st.caption(f"Focus: {next_workout.get('focus', 'N/A')} • Intensity: {next_workout.get('intensity', 'Moderate')} • Duration: {int(next_workout.get('estimated_duration_min', 0))} min")
+    st.caption(str(next_workout.get('coaching_note', '')))
+    for ex in (next_workout.get('recommended_exercises', []) or [])[:3]:
+        st.markdown(
+            f"- {ex.get('exercise')}: {ex.get('suggested_sets')} sets of {ex.get('suggested_rep_range')} at {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs"
+        )
+
+    st.markdown('### Next-Session Progression Suggestions')
+    if not progression.get('recommendations'):
+        st.caption('Complete more workouts to improve personalized recommendations.')
+    else:
+        for item in progression.get('recommendations', [])[:5]:
+            st.markdown(
+                f"- {item.get('exercise')}: {item.get('suggested_action')} -> {float(item.get('suggested_weight', 0) or 0):.1f} lbs for {item.get('suggested_rep_range')} (last: {float(item.get('last_weight', 0) or 0):.1f} x {float(item.get('last_reps', 0) or 0):.0f} @ RPE {float(item.get('last_rpe', 0) or 0):.1f})"
+            )
 
     c1, c2, c3 = st.columns(3)
     if c1.button('View History', key=f'{flow_key}_summary_history', use_container_width=True):
@@ -590,6 +676,257 @@ def group_sessions(log_df: pd.DataFrame) -> pd.DataFrame:
     grouped['pr_count'] = 0
     grouped = grouped.sort_values('date', ascending=False)
     return grouped
+
+
+def get_recent_pr_events(log_df: pd.DataFrame, days: int = 21) -> pd.DataFrame:
+    if log_df is None or log_df.empty:
+        return pd.DataFrame(columns=['date', 'session_id', 'exercise', 'record_type', 'new_record', 'previous_record', 'improvement'])
+
+    df = log_df.copy()
+    for col in ['date', 'exercise', 'workout_session_id', 'weight_lbs', 'reps', 'volume', 'rpe', 'set_number']:
+        if col not in df.columns:
+            df[col] = '' if col in {'date', 'exercise', 'workout_session_id'} else 0
+
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    if df.empty:
+        return pd.DataFrame(columns=['date', 'session_id', 'exercise', 'record_type', 'new_record', 'previous_record', 'improvement'])
+
+    for col in ['weight_lbs', 'reps', 'volume', 'set_number']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    df['exercise'] = df['exercise'].astype(str).str.strip()
+    df['session_id'] = df['workout_session_id'].astype(str).str.strip()
+    sid_empty = df['session_id'].eq('')
+    df.loc[sid_empty, 'session_id'] = df.loc[sid_empty, 'date'].dt.date.astype(str) + '|fallback'
+    df['est_1rm'] = df['weight_lbs'] * (1 + (df['reps'] / 30.0))
+
+    events = []
+    history = {}
+    session_rollup_seen = set()
+
+    for _, row in df.sort_values(['date', 'set_number']).iterrows():
+        ex = str(row['exercise'])
+        if not ex:
+            continue
+
+        key = ex.lower()
+        state = history.setdefault(key, {
+            'heaviest': 0.0,
+            'best_1rm': 0.0,
+            'best_set_volume': 0.0,
+            'reps_at_weight': {},
+        })
+
+        weight = float(row['weight_lbs'])
+        reps = float(row['reps'])
+        volume = float(row['volume'])
+        e1rm = float(row['est_1rm'])
+        when = str(pd.Timestamp(row['date']).date())
+        sid = str(row['session_id'])
+
+        if weight > state['heaviest']:
+            prev = state['heaviest']
+            state['heaviest'] = weight
+            events.append({'date': when, 'session_id': sid, 'exercise': ex, 'record_type': 'Heaviest weight', 'new_record': round(weight, 1), 'previous_record': round(prev, 1), 'improvement': round(weight - prev, 1)})
+
+        if e1rm > state['best_1rm']:
+            prev = state['best_1rm']
+            state['best_1rm'] = e1rm
+            events.append({'date': when, 'session_id': sid, 'exercise': ex, 'record_type': 'Highest estimated 1RM', 'new_record': round(e1rm, 1), 'previous_record': round(prev, 1), 'improvement': round(e1rm - prev, 1)})
+
+        if volume > state['best_set_volume']:
+            prev = state['best_set_volume']
+            state['best_set_volume'] = volume
+            events.append({'date': when, 'session_id': sid, 'exercise': ex, 'record_type': 'Highest set volume', 'new_record': round(volume, 1), 'previous_record': round(prev, 1), 'improvement': round(volume - prev, 1)})
+
+        w_key = round(weight, 1)
+        prev_reps_at_weight = float(state['reps_at_weight'].get(w_key, 0.0))
+        if reps > prev_reps_at_weight:
+            state['reps_at_weight'][w_key] = reps
+            if prev_reps_at_weight > 0:
+                events.append({'date': when, 'session_id': sid, 'exercise': ex, 'record_type': 'Most reps at a given weight', 'new_record': int(reps), 'previous_record': int(prev_reps_at_weight), 'improvement': int(reps - prev_reps_at_weight)})
+
+        s_rollup_key = (sid, when)
+        if s_rollup_key not in session_rollup_seen:
+            session_rollup_seen.add(s_rollup_key)
+            session_rows = df[df['session_id'] == sid]
+            session_volume = float(session_rows['volume'].sum())
+            session_sets = int(len(session_rows))
+            existing_session_events = [e for e in events if e['exercise'] == 'Session']
+            best_session_volume = max([float(e['new_record']) for e in existing_session_events if e['record_type'] == 'Highest session volume'] + [0.0])
+            best_session_sets = max([int(e['new_record']) for e in existing_session_events if e['record_type'] == 'Most sets in a session'] + [0])
+            if session_volume > best_session_volume:
+                events.append({'date': when, 'session_id': sid, 'exercise': 'Session', 'record_type': 'Highest session volume', 'new_record': round(session_volume, 1), 'previous_record': round(best_session_volume, 1), 'improvement': round(session_volume - best_session_volume, 1)})
+            if session_sets > best_session_sets:
+                events.append({'date': when, 'session_id': sid, 'exercise': 'Session', 'record_type': 'Most sets in a session', 'new_record': int(session_sets), 'previous_record': int(best_session_sets), 'improvement': int(session_sets - best_session_sets)})
+
+    if not events:
+        return pd.DataFrame(columns=['date', 'session_id', 'exercise', 'record_type', 'new_record', 'previous_record', 'improvement'])
+
+    ev = pd.DataFrame(events)
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=int(days))
+    ev = ev[pd.to_datetime(ev['date'], errors='coerce') >= cutoff]
+    return ev.sort_values('date', ascending=False).reset_index(drop=True)
+
+
+def get_active_workout_for_day(workouts_df: pd.DataFrame, day: str) -> pd.DataFrame:
+    recommended = st.session_state.get('recommended_workout_active', {})
+    if not isinstance(recommended, dict):
+        recommended = {}
+    if str(recommended.get('active_day', '')) == str(day) and recommended.get('rows'):
+        rec_df = pd.DataFrame(recommended.get('rows', []))
+        expected = ['day', 'muscle_group', 'exercise', 'target_sets', 'target_reps', 'base_weight', 'image_file']
+        for col in expected:
+            if col not in rec_df.columns:
+                rec_df[col] = '' if col in {'day', 'muscle_group', 'exercise', 'target_reps', 'image_file'} else 0
+        return rec_df[expected].reset_index(drop=True)
+    return workouts_df[workouts_df.day == day].reset_index(drop=True)
+
+
+def get_exercise_coach_snapshot(log_df: pd.DataFrame, exercise_name: str, progression: dict, plateau: dict) -> dict:
+    result = {
+        'last_performance': 'No history',
+        'personal_best': 'No history',
+        'estimated_1rm': 'N/A',
+        'weight_trend': 'stable',
+        'rep_trend': 'stable',
+        'volume_trend': 'stable',
+        'recent_sessions': pd.DataFrame(),
+        'progression_action': 'Hold Weight',
+        'suggested_next_weight': None,
+        'suggested_rep_range': '8-12',
+        'plateau_status': 'No plateau signal',
+    }
+    if log_df is None or log_df.empty:
+        return result
+
+    ex = log_df[log_df['exercise'].astype(str).str.strip().str.lower() == str(exercise_name).strip().lower()].copy()
+    if ex.empty:
+        return result
+
+    ex['date'] = pd.to_datetime(ex['date'], errors='coerce')
+    ex = ex.dropna(subset=['date']).sort_values('date')
+    for c in ['weight_lbs', 'reps', 'volume']:
+        ex[c] = pd.to_numeric(ex.get(c, 0), errors='coerce').fillna(0)
+    ex['estimated_1rm'] = ex['weight_lbs'] * (1 + (ex['reps'] / 30.0))
+
+    last = ex.iloc[-1]
+    best = ex.loc[ex['weight_lbs'].idxmax()] if not ex.empty else last
+    result['last_performance'] = f"{str(pd.Timestamp(last['date']).date())} • {float(last['weight_lbs']):.1f} lbs x {int(last['reps'])}"
+    result['personal_best'] = f"{float(best['weight_lbs']):.1f} lbs"
+    result['estimated_1rm'] = f"{float(ex['estimated_1rm'].max()):.1f} lbs"
+
+    if len(ex) >= 4:
+        w_first = float(ex.head(2)['weight_lbs'].mean())
+        w_last = float(ex.tail(2)['weight_lbs'].mean())
+        r_first = float(ex.head(2)['reps'].mean())
+        r_last = float(ex.tail(2)['reps'].mean())
+        v_first = float(ex.head(2)['volume'].mean())
+        v_last = float(ex.tail(2)['volume'].mean())
+        result['weight_trend'] = 'up' if w_last > (w_first * 1.02) else ('down' if w_last < (w_first * 0.98) else 'stable')
+        result['rep_trend'] = 'up' if r_last > (r_first * 1.05) else ('down' if r_last < (r_first * 0.95) else 'stable')
+        result['volume_trend'] = 'up' if v_last > (v_first * 1.05) else ('down' if v_last < (v_first * 0.95) else 'stable')
+
+    recent = ex.tail(8)[['date', 'weight_lbs', 'reps', 'volume', 'estimated_1rm']].copy()
+    recent['date'] = recent['date'].dt.date.astype(str)
+    result['recent_sessions'] = recent
+
+    p_map = (progression or {}).get('by_exercise', {})
+    p_item = p_map.get(exercise_name) or p_map.get(str(exercise_name).strip())
+    if p_item:
+        result['progression_action'] = str(p_item.get('suggested_action', 'Hold Weight'))
+        result['suggested_next_weight'] = float(p_item.get('suggested_weight', 0) or 0)
+        result['suggested_rep_range'] = str(p_item.get('suggested_rep_range', '8-12'))
+
+    plateau_map = (plateau or {}).get('by_exercise', {})
+    pl_item = plateau_map.get(exercise_name) or plateau_map.get(str(exercise_name).strip())
+    if pl_item and bool(pl_item.get('possible_plateau')):
+        result['plateau_status'] = f"Possible Plateau • {pl_item.get('likely_reason', '')}"
+
+    return result
+
+
+def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame, recovery_snapshot: dict, progression: dict, plateau: dict) -> dict:
+    if log_df is None or log_df.empty:
+        return {
+            'workouts_completed': 0,
+            'weekly_volume': 0,
+            'muscles_trained': [],
+            'prs_achieved': 0,
+            'strongest_progress': [],
+            'stalled_exercises': [],
+            'recovery_summary': 'No recent history',
+            'consistency_score': 0,
+            'priorities': ['Complete more workouts to improve personalized recommendations.'],
+            'text_report': 'Complete more workouts to improve personalized recommendations.',
+            'html_report': '<h2>Weekly Coaching Report</h2><p>Complete more workouts to improve personalized recommendations.</p>',
+        }
+
+    df = log_df.copy()
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df = df.dropna(subset=['date'])
+    for c in ['volume', 'rpe']:
+        df[c] = pd.to_numeric(df.get(c, 0), errors='coerce').fillna(0)
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=6)
+    week = df[df['date'] >= cutoff].copy()
+
+    workouts_completed = int(week['date'].dt.date.nunique()) if not week.empty else 0
+    weekly_volume = int(week['volume'].sum()) if not week.empty else 0
+    muscles_trained = sorted(week['day'].astype(str).dropna().unique().tolist()) if 'day' in week.columns and not week.empty else []
+    prs_recent = get_recent_pr_events(df, days=7)
+    prs_achieved = int(len(prs_recent))
+
+    prog_items = list((progression or {}).get('recommendations', []))
+    strongest_progress = [p['exercise'] for p in prog_items if str(p.get('performance_trend')) == 'improving'][:5]
+    stalled = [p['exercise'] for p in (plateau or {}).get('plateaus', [])][:5]
+
+    top_ready = [str(x.get('muscle', '')).title() for x in (recovery_snapshot or {}).get('top_ready', [])]
+    top_fatigued = [str(x.get('muscle', '')).title() for x in (recovery_snapshot or {}).get('top_fatigued', [])]
+    recovery_summary = f"Ready: {', '.join(top_ready[:3]) or 'N/A'} | Recover: {', '.join(top_fatigued[:3]) or 'N/A'}"
+
+    consistency_score = min(100, int((workouts_completed / 5.0) * 100))
+    priorities = []
+    if stalled:
+        priorities.append('Address stalled lifts with rep-range adjustments and recovery focus.')
+    if workouts_completed < 4:
+        priorities.append('Increase session consistency next week.')
+    if top_fatigued:
+        priorities.append(f"Reduce load on {', '.join(top_fatigued[:2])} until readiness improves.")
+    if not priorities:
+        priorities.append('Maintain current progression plan and prioritize execution quality.')
+
+    lines = [
+        'Brian Fit 7.1 Weekly Coaching Report',
+        f'Workouts completed: {workouts_completed}',
+        f'Weekly volume: {weekly_volume:,} lbs',
+        f'Muscle groups trained: {", ".join(muscles_trained) if muscles_trained else "N/A"}',
+        f'PRs achieved: {prs_achieved}',
+        f'Strongest progress: {", ".join(strongest_progress) if strongest_progress else "None detected"}',
+        f'Exercises stalled: {", ".join(stalled) if stalled else "None detected"}',
+        f'Recovery summary: {recovery_summary}',
+        f'Consistency score: {consistency_score}/100',
+        'Suggested priorities for next week:',
+    ] + [f'- {p}' for p in priorities]
+    text_report = '\n'.join(lines)
+
+    html_report = '<h2>Brian Fit 7.1 Weekly Coaching Report</h2>'
+    html_report += f'<p><b>Workouts completed:</b> {workouts_completed}<br><b>Weekly volume:</b> {weekly_volume:,} lbs<br><b>Muscle groups trained:</b> {", ".join(muscles_trained) if muscles_trained else "N/A"}<br><b>PRs achieved:</b> {prs_achieved}<br><b>Consistency score:</b> {consistency_score}/100</p>'
+    html_report += f'<p><b>Strongest progress:</b> {", ".join(strongest_progress) if strongest_progress else "None detected"}<br><b>Exercises stalled:</b> {", ".join(stalled) if stalled else "None detected"}<br><b>Recovery summary:</b> {recovery_summary}</p>'
+    html_report += '<h3>Suggested priorities for next week</h3><ul>' + ''.join([f'<li>{p}</li>' for p in priorities]) + '</ul>'
+
+    return {
+        'workouts_completed': workouts_completed,
+        'weekly_volume': weekly_volume,
+        'muscles_trained': muscles_trained,
+        'prs_achieved': prs_achieved,
+        'strongest_progress': strongest_progress,
+        'stalled_exercises': stalled,
+        'recovery_summary': recovery_summary,
+        'consistency_score': consistency_score,
+        'priorities': priorities,
+        'text_report': text_report,
+        'html_report': html_report,
+    }
 
 
 def make_workout_session_id(flow_key: str) -> str:
@@ -1011,11 +1348,28 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 .history-session-card{background:linear-gradient(135deg,#0f1f34,#0a1728);border:1px solid rgba(96,165,250,.35);border-radius:18px;padding:14px;margin:10px 0}
 .chart-shell{background:#0e1a2d;border:1px solid rgba(96,165,250,.24);border-radius:16px;padding:10px}
 
+.ai-coach-shell{display:grid;gap:14px;margin-bottom:16px}
+.ai-hero{background:linear-gradient(138deg,#050b14,#0a1c31 60%,#123860);border:1px solid rgba(96,165,250,.4);border-radius:24px;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.ai-kicker{color:#86efac;font-size:.72rem;letter-spacing:.2em;font-weight:900;text-transform:uppercase}
+.ai-greet{font-size:2rem;font-weight:950;color:#f8fafc;margin-top:6px}
+.ai-sub{color:#c6d4e6;margin-top:8px}
+.ai-big{font-size:2.8rem;font-weight:950;color:#22c55e;line-height:1}
+.ai-card{background:linear-gradient(160deg,#0d1d30,#0a1423);border:1px solid rgba(96,165,250,.28);border-radius:20px;padding:14px;box-shadow:0 12px 34px rgba(0,0,0,.25)}
+.ai-card-title{font-size:.8rem;letter-spacing:.14em;text-transform:uppercase;font-weight:900;color:#93c5fd;margin-bottom:8px}
+.ai-pill{display:inline-block;padding:7px 10px;border-radius:999px;border:1px solid rgba(96,165,250,.4);background:rgba(37,99,235,.18);color:#dbeafe;font-size:.78rem;font-weight:900;margin:5px 6px 0 0}
+.ai-rec-card{background:linear-gradient(148deg,#081223,#102845);border:1px solid rgba(34,197,94,.45);border-radius:22px;padding:16px;box-shadow:0 14px 38px rgba(0,0,0,.28)}
+.ai-session-card{background:linear-gradient(150deg,#0a1829,#0b1523);border:1px solid rgba(148,163,184,.26);border-radius:18px;padding:14px;margin:10px 0}
+.ai-grade{font-size:2rem;font-weight:950;color:#fff}
+.ai-pr-banner{background:linear-gradient(135deg,rgba(245,158,11,.22),rgba(15,31,52,.95));border:1px solid rgba(245,158,11,.55);border-radius:18px;padding:14px}
+
 @media (max-width: 850px){
     section[data-testid="stSidebar"]{display:none !important;}
     div[data-testid="stHorizontalBlock"] button[kind="secondary"]{min-height:44px; font-size:0.95rem; font-weight:800;}
+    div[data-testid="stHorizontalBlock"] button{min-height:48px; font-size:1rem; font-weight:900;}
     .title{font-size:1.6rem}
     .x-title{font-size:1.85rem}
+    .ai-greet{font-size:1.55rem}
+    .ai-big{font-size:2.1rem}
     .mobile-nav-shell div[role="radiogroup"]{overflow-x:auto; white-space:nowrap; display:flex; gap:6px; padding-bottom:2px}
     .mobile-nav-shell label{flex:0 0 auto}
 }
@@ -1031,9 +1385,9 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
-nav_options = ["Dashboard","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 6.0")
-st.sidebar.caption("X.13 Mobile Performance Platform")
+nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
+st.sidebar.markdown("## 🏋️ Brian Fit 7.1")
+st.sidebar.caption("X.15 AI Coach Experience")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 page = get_mobile_primary_page()
@@ -1119,7 +1473,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-        <div class="x-kicker">Brian Fit 6.0 • X.13 Mobile Performance Platform</div>
+        <div class="x-kicker">Brian Fit 7.1 • X.15 AI Coach Experience</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -1249,9 +1603,324 @@ if page == "Dashboard":
                 events_df = pd.DataFrame(events).drop_duplicates(subset=['date', 'exercise', 'records']).sort_values('date', ascending=False).head(12)
                 st.dataframe(events_df, use_container_width=True)
 
+    st.markdown('### Recent PRs')
+    recent_prs = get_recent_pr_events(log, days=14)
+    if recent_prs.empty:
+        st.caption('No recent PRs yet.')
+    else:
+        st.dataframe(recent_prs.head(10), use_container_width=True)
+
+elif page == "AI Personal Trainer":
+    cloud_log = load_log()
+    nutrition_df = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
+    body_df = read_csv_safe(BODY, BODY_COLUMNS)
+    recovery_df = read_csv_safe(RECOVERY, RECOVERY_COLUMNS)
+
+    progression = analyze_progressive_overload(cloud_log, workouts)
+    plateau = detect_plateaus(cloud_log)
+    recovery_snapshot = build_muscle_recovery_snapshot(
+        recovery_df=recovery_df,
+        workout_log_df=cloud_log,
+        body_df=body_df,
+    )
+    next_workout = generate_next_workout(cloud_log, workouts, recovery_snapshot=recovery_snapshot)
+    weekly_report = build_weekly_coaching_report(cloud_log, workouts, recovery_snapshot, progression, plateau)
+
+    today_s = str(date.today())
+    today_nut = nutrition_df[nutrition_df['date'].astype(str) == today_s] if not nutrition_df.empty and 'date' in nutrition_df.columns else pd.DataFrame()
+    water_today = int(pd.to_numeric(today_nut.get('water_oz', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not today_nut.empty else 0
+    protein_today = int(pd.to_numeric(today_nut.get('protein_g', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not today_nut.empty else 0
+
+    rec_exercises = next_workout.get('recommended_exercises', []) or []
+    muscles_df = pd.DataFrame(recovery_snapshot.get('muscles', {}).values())
+    avg_recovery = int(muscles_df['recovery_pct'].mean()) if not muscles_df.empty and 'recovery_pct' in muscles_df.columns else 0
+    readiness_status = 'Ready' if avg_recovery >= 78 else ('Moderate' if avg_recovery >= 60 else ('Recovering' if avg_recovery >= 40 else 'Fatigued'))
+
+    recent_14 = cloud_log.copy()
+    if not recent_14.empty:
+        recent_14['date'] = pd.to_datetime(recent_14['date'], errors='coerce')
+        recent_14 = recent_14.dropna(subset=['date'])
+        recent_14 = recent_14[recent_14['date'] >= (pd.Timestamp(date.today()) - pd.Timedelta(days=13))]
+        recent_14['rpe'] = pd.to_numeric(recent_14.get('rpe', 0), errors='coerce').fillna(0)
+
+    sessions_14 = int(recent_14['date'].dt.date.nunique()) if not recent_14.empty else 0
+    avg_recent_rpe = float(recent_14['rpe'].mean()) if not recent_14.empty else 0.0
+    training_confidence = min(96, 42 + (sessions_14 * 9) + min(20, len(progression.get('recommendations', [])) * 3))
+    if avg_recent_rpe >= 9.0:
+        training_confidence = max(35, training_confidence - 20)
+    elif avg_recent_rpe >= 8.5:
+        training_confidence = max(40, training_confidence - 10)
+
+    st.markdown('<div class="ai-coach-shell">', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="ai-hero">
+          <div class="ai-kicker">Brian Fit 7.1 • X.15 AI Coach Experience</div>
+          <div class="ai-greet">Good Morning Brian</div>
+          <div class="ai-sub">Recovery score {avg_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric('Recovery Score', f"{avg_recovery}%")
+    h2.metric('Readiness', readiness_status)
+    h3.metric('Recommended Workout', str(next_workout.get('focus', 'N/A')))
+    h4.metric('Estimated Duration', f"{int(next_workout.get('estimated_duration_min', 0))} min")
+
+    cta_col, conf_col = st.columns([1.2, 1])
+    if cta_col.button('Start Recommended Workout', use_container_width=True, key='ai71_start_recommended'):
+        st.session_state['ai71_show_preview'] = True
+    conf_col.markdown(f'<div class="ai-card"><div class="ai-card-title">Training Confidence</div><div class="ai-big">{int(training_confidence)}%</div><div class="small">Based on recent sessions, progression signals, and recovery trends.</div></div>', unsafe_allow_html=True)
+
+    if not bool(next_workout.get('has_sufficient_history')):
+        st.info('Complete more workouts to improve personalized coaching.')
+
+    reason_line = str(next_workout.get('coaching_note', '')).strip()
+    first_reason = ''
+    if rec_exercises:
+        first_ex_name = str(rec_exercises[0].get('exercise', ''))
+        p_match = next((p for p in progression.get('recommendations', []) if str(p.get('exercise', '')).lower() == first_ex_name.lower()), None)
+        if p_match:
+            first_reason = f"Last session completed at {float(p_match.get('last_weight', 0) or 0):.1f} lbs for {float(p_match.get('last_reps', 0) or 0):.0f} reps with RPE {float(p_match.get('last_rpe', 0) or 0):.1f}."
+
+    st.markdown('<div class="ai-rec-card">', unsafe_allow_html=True)
+    st.markdown('### Today\'s Recommendation')
+    st.markdown(f"**Workout Focus:** {next_workout.get('focus', 'N/A')}")
+    st.markdown(f"**Recommended Intensity:** {next_workout.get('intensity', 'Moderate')}")
+    st.markdown(f"**Estimated Duration:** {int(next_workout.get('estimated_duration_min', 0))} min")
+    if rec_exercises:
+        for ex in rec_exercises[:8]:
+            st.markdown(
+                f"- **{ex.get('exercise')}** | {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs | {int(ex.get('suggested_sets', 3) or 3)} sets | {ex.get('suggested_rep_range', '8-12')} reps | {int(ex.get('rest_seconds', 90) or 90)} sec rest"
+            )
+    else:
+        st.caption('Complete more workouts to improve personalized coaching.')
+    st.caption(f"Reason: {first_reason or reason_line or 'Complete more workouts to improve personalized coaching.'}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if bool(st.session_state.get('ai71_show_preview', False)):
+        st.markdown('<div class="ai-card">', unsafe_allow_html=True)
+        st.markdown('### Recommended Workout Preview')
+        st.caption('Confirm to load this recommendation into today\'s active workout. Existing plan remains unchanged unless confirmed.')
+        for ex in rec_exercises[:8]:
+            st.markdown(f"- {ex.get('exercise')} • {int(ex.get('suggested_sets', 3) or 3)} sets • {ex.get('suggested_rep_range', '8-12')} • {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs")
+        p1, p2 = st.columns(2)
+        if p1.button('Confirm and Load Workout', use_container_width=True, key='ai71_confirm_load'):
+            day_for_plan = str(date.today().strftime('%A'))
+            rows = []
+            for ex in rec_exercises:
+                rows.append({
+                    'day': day_for_plan,
+                    'muscle_group': str(next_workout.get('focus', 'AI Focus')),
+                    'exercise': str(ex.get('exercise', '')),
+                    'target_sets': int(ex.get('suggested_sets', 3) or 3),
+                    'target_reps': str(ex.get('suggested_rep_range', '8-12')),
+                    'base_weight': float(ex.get('suggested_starting_weight', 0) or 0),
+                    'image_file': '',
+                })
+            st.session_state['recommended_workout_active'] = {
+                'active_day': day_for_plan,
+                'rows': rows,
+                'focus': str(next_workout.get('focus', 'AI Focus')),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            st.session_state['ai71_show_preview'] = False
+            st.session_state['mobile_primary_nav'] = 'Workout'
+            st.session_state['mobile_nav_override'] = 'Workout'
+            st.session_state['main_nav'] = 'Gym Mode'
+            st.rerun()
+        if p2.button('Cancel Preview', use_container_width=True, key='ai71_cancel_preview'):
+            st.session_state['ai71_show_preview'] = False
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('### Strength Prediction')
+    recent_sorted = cloud_log.copy()
+    if not recent_sorted.empty:
+        recent_sorted['date'] = pd.to_datetime(recent_sorted['date'], errors='coerce')
+        recent_sorted = recent_sorted.dropna(subset=['date']).sort_values('date', ascending=False)
+    recent_exercises = []
+    if not recent_sorted.empty:
+        recent_exercises = recent_sorted['exercise'].astype(str).str.strip().drop_duplicates().head(6).tolist()
+
+    if not recent_exercises:
+        st.caption('Complete more workouts to improve personalized coaching.')
+    else:
+        for ex_name in recent_exercises:
+            p_item = next((p for p in progression.get('recommendations', []) if str(p.get('exercise', '')).lower() == str(ex_name).lower()), None)
+            if not p_item:
+                continue
+            action = str(p_item.get('suggested_action', 'Hold Weight'))
+            last_rpe = float(p_item.get('last_rpe', 0) or 0)
+            trend = str(p_item.get('performance_trend', 'stable'))
+            if action in {'Increase Weight', 'Increase Reps'} and (last_rpe >= 9.0 or trend == 'declining'):
+                action = 'Hold Weight'
+            conf = 72
+            if trend == 'improving':
+                conf += 14
+            elif trend == 'stable':
+                conf += 6
+            else:
+                conf -= 14
+            if last_rpe >= 9.0:
+                conf -= 20
+            elif last_rpe >= 8.5:
+                conf -= 10
+            conf = max(35, min(96, conf))
+
+            st.markdown('<div class="ai-card">', unsafe_allow_html=True)
+            st.markdown(f"**{ex_name}**")
+            st.markdown(f"Last: {float(p_item.get('last_weight', 0) or 0):.1f} x {float(p_item.get('last_reps', 0) or 0):.0f}")
+            st.markdown(f"Next: {action} -> {float(p_item.get('suggested_weight', 0) or 0):.1f} x {p_item.get('suggested_rep_range', '8-12')}")
+            st.markdown(f"Confidence: {int(conf)}%")
+            st.markdown(f"Why: {p_item.get('rationale', '')}")
+            st.markdown(f"- Last RPE: {last_rpe:.1f}")
+            st.markdown(f"- Performance trend: {trend}")
+            st.markdown(f"- Volume trend: {p_item.get('volume_trend', 'stable')}")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="ai-card">', unsafe_allow_html=True)
+    st.markdown('### Coach Notes')
+    coach_notes = []
+    for p_item in progression.get('recommendations', [])[:4]:
+        ex = str(p_item.get('exercise', ''))
+        act = str(p_item.get('suggested_action', 'Hold Weight'))
+        wt = float(p_item.get('suggested_weight', 0) or 0)
+        rr = str(p_item.get('suggested_rep_range', '8-12'))
+        if act == 'Increase Weight':
+            coach_notes.append(f"Increase {ex} by safe increment to {wt:.1f} lbs next session.")
+        elif act == 'Increase Reps':
+            coach_notes.append(f"Hold {ex} at current weight and aim for {rr} reps.")
+        elif act in {'Recovery Recommended', 'Reduce Weight'}:
+            coach_notes.append(f"{ex} shows high fatigue; reduce load or add recovery before progression.")
+        else:
+            coach_notes.append(f"Hold {ex} and improve execution quality before adding load.")
+    fatigued = [str(x.get('muscle', '')).title() for x in recovery_snapshot.get('top_fatigued', [])[:2]]
+    if fatigued:
+        coach_notes.append(f"Recovery is reduced for {', '.join(fatigued)} after recent workload.")
+    if (plateau.get('plateaus') or []):
+        coach_notes.append('Possible plateau detected on at least one lift; consider rep-range adjustment and recovery support.')
+    for note in coach_notes[:6]:
+        st.markdown(f"- {note}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('### Weekly Scorecard')
+    week_df = cloud_log.copy()
+    if not week_df.empty:
+        week_df['date'] = pd.to_datetime(week_df['date'], errors='coerce')
+        week_df = week_df.dropna(subset=['date'])
+        week_df['volume'] = pd.to_numeric(week_df.get('volume', 0), errors='coerce').fillna(0)
+    this_cut = pd.Timestamp(date.today()) - pd.Timedelta(days=6)
+    prev_start = pd.Timestamp(date.today()) - pd.Timedelta(days=13)
+    prev_end = pd.Timestamp(date.today()) - pd.Timedelta(days=7)
+    this_week = week_df[week_df['date'] >= this_cut] if not week_df.empty else pd.DataFrame()
+    prev_week = week_df[(week_df['date'] >= prev_start) & (week_df['date'] <= prev_end)] if not week_df.empty else pd.DataFrame()
+    this_vol = int(this_week['volume'].sum()) if not this_week.empty else 0
+    prev_vol = int(prev_week['volume'].sum()) if not prev_week.empty else 0
+    vol_change = this_vol - prev_vol
+    strength_trend = 'Stable'
+    improving_count = len([x for x in progression.get('recommendations', []) if str(x.get('performance_trend')) == 'improving'])
+    declining_count = len([x for x in progression.get('recommendations', []) if str(x.get('performance_trend')) == 'declining'])
+    if improving_count > declining_count:
+        strength_trend = 'Improving'
+    elif declining_count > improving_count:
+        strength_trend = 'Declining'
+    pr_count = int(len(get_recent_pr_events(cloud_log, days=7)))
+    consistency_score = int(weekly_report.get('consistency_score', 0) or 0)
+    grade_score = int((consistency_score * 0.30) + (min(100, max(0, 50 + (vol_change / 100.0))) * 0.20) + (avg_recovery * 0.25) + (min(100, 50 + (improving_count - declining_count) * 8) * 0.25))
+    if grade_score >= 95:
+        weekly_grade = 'A+'
+    elif grade_score >= 90:
+        weekly_grade = 'A'
+    elif grade_score >= 80:
+        weekly_grade = 'B'
+    elif grade_score >= 70:
+        weekly_grade = 'C'
+    else:
+        weekly_grade = 'Needs Work'
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric('Workouts Completed', str(int(weekly_report.get('workouts_completed', 0))))
+    sc2.metric('Consistency Score', f"{consistency_score}/100")
+    sc3.metric('Weekly Volume', f"{this_vol:,} lbs")
+    sc4.metric('Volume vs Prev Week', f"{vol_change:+,} lbs")
+    sc5, sc6, sc7, sc8 = st.columns(4)
+    sc5.metric('Strength Trend', strength_trend)
+    sc6.metric('Recovery Score', f"{avg_recovery}%")
+    sc7.metric('PR Count', str(pr_count))
+    sc8.markdown(f'<div class="ai-card"><div class="ai-card-title">Overall Weekly Grade</div><div class="ai-grade">{weekly_grade}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('### Personal Record Spotlight')
+    pr_events = get_recent_pr_events(cloud_log, days=30)
+    if pr_events.empty:
+        st.info('Complete more workouts to unlock PR tracking.')
+    else:
+        top_pr = pr_events.iloc[0]
+        st.markdown('<div class="ai-pr-banner">', unsafe_allow_html=True)
+        st.markdown('**NEW PERSONAL RECORD**')
+        st.markdown(f"Exercise: {top_pr.get('exercise', 'N/A')}")
+        st.markdown(f"Record type: {top_pr.get('record_type', 'N/A')}")
+        st.markdown(f"New value: {top_pr.get('new_record', 'N/A')}")
+        st.markdown(f"Previous value: {top_pr.get('previous_record', 'N/A')}")
+        st.markdown(f"Improvement: +{top_pr.get('improvement', 'N/A')}")
+        st.markdown(f"Date: {top_pr.get('date', 'N/A')}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('### Workout Timeline')
+    sessions = group_sessions(cloud_log)
+    if sessions.empty:
+        st.caption('Complete more workouts to improve personalized coaching.')
+    else:
+        if 'ai_timeline_open' not in st.session_state:
+            st.session_state['ai_timeline_open'] = ''
+        pr_map = {}
+        if not pr_events.empty and 'session_id' in pr_events.columns:
+            for sid, grp in pr_events.groupby('session_id'):
+                pr_map[str(sid)] = int(len(grp))
+        for _, s in sessions.head(6).iterrows():
+            sid = str(s.get('session_key', ''))
+            pr_cnt = pr_map.get(sid, 0)
+            st.markdown('<div class="ai-session-card">', unsafe_allow_html=True)
+            st.markdown(f"**Date:** {s.get('date', '')}  ")
+            st.markdown(f"**Workout focus:** {s.get('focus', '')}  ")
+            st.markdown(f"**Exercises:** {int(s.get('exercises', 0))} • **Sets:** {int(s.get('sets', 0))} • **Total volume:** {int(float(s.get('total_volume', 0) or 0)):,} lbs • **Average RPE:** {float(s.get('avg_rpe', 0) or 0):.1f} • **PR count:** {pr_cnt}")
+            if st.button('View Details', key=f'ai_timeline_{sid}', use_container_width=True):
+                st.session_state['ai_timeline_open'] = sid
+            if str(st.session_state.get('ai_timeline_open', '')) == sid:
+                sess_rows = cloud_log.copy()
+                if 'workout_session_id' in sess_rows.columns and sid:
+                    sess_rows = sess_rows[sess_rows['workout_session_id'].astype(str).str.strip() == sid]
+                    if sess_rows.empty:
+                        sess_rows = cloud_log[(cloud_log['date'].astype(str) + '|' + cloud_log['day'].astype(str)) == sid]
+                for _, r in sess_rows.head(20).iterrows():
+                    st.markdown(
+                        f"- {str(r.get('exercise', ''))}: {float(r.get('weight_lbs', 0) or 0):.1f} lbs x {float(r.get('reps', 0) or 0):.0f} (RPE {float(r.get('rpe', 0) or 0):.1f})"
+                    )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('### Goals')
+    g1, g2, g3 = st.columns(3)
+    g1.metric('Hydration Goal', f"{water_today}/100 oz")
+    g2.metric('Protein Goal', f"{protein_today}/160 g")
+    g3.metric('Sleep Goal', '7.5 - 9.0 hours')
+
+    mobile_actions = st.columns(3)
+    if mobile_actions[0].button('View Today\'s Plan', use_container_width=True, key='ai71_mobile_view_plan'):
+        st.session_state['main_nav'] = "Today's Workout"
+        st.rerun()
+    if mobile_actions[1].button('View Recovery', use_container_width=True, key='ai71_mobile_recovery'):
+        st.session_state['main_nav'] = 'Recovery Center'
+        st.rerun()
+    if mobile_actions[2].button('View Progress', use_container_width=True, key='ai71_mobile_progress'):
+        st.session_state['main_nav'] = 'Progress Analytics'
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
 elif page == "Today's Workout":
     day = st.selectbox("Workout Day", days, index=date.today().weekday() if date.today().weekday()<7 else 0, key="x6_day")
-    active = workouts[workouts.day == day].reset_index(drop=True)
+    active = get_active_workout_for_day(workouts, day)
     group = active.muscle_group.iloc[0] if not active.empty else "Recovery / Rest"
     log_now = load_log()
     completed_today = 0
@@ -1464,7 +2133,7 @@ elif page == "Today's Workout":
 
 elif page == "Gym Mode":
     day = st.selectbox("Workout Day", days, index=date.today().weekday() if date.today().weekday()<7 else 0, key="gym_day")
-    active = workouts[workouts.day==day].reset_index(drop=True)
+    active = get_active_workout_for_day(workouts, day)
     group = active.muscle_group.iloc[0] if not active.empty else 'Recovery / Rest'
     st.markdown(f'<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Gym Mode</div><div class="sub">{day} — {group}. One exercise at a time with larger controls.</div></div>', unsafe_allow_html=True)
     if active.empty:
@@ -1686,6 +2355,55 @@ elif page == "AI Coach":
             st.caption('Rule-based coaching from workout history. Not medical advice.')
             st.markdown('</div>', unsafe_allow_html=True)
 
+
+elif page == "Weekly Coaching Report":
+    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.1</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
+    log_week = load_log()
+    workouts_week = load_workouts()
+    progression_week = analyze_progressive_overload(log_week, workouts_week)
+    plateau_week = detect_plateaus(log_week)
+    recovery_week = build_muscle_recovery_snapshot(
+        recovery_df=read_csv_safe(RECOVERY, RECOVERY_COLUMNS),
+        workout_log_df=log_week,
+        body_df=read_csv_safe(BODY, BODY_COLUMNS),
+    )
+    weekly_report = build_weekly_coaching_report(log_week, workouts_week, recovery_week, progression_week, plateau_week)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric('Workouts Completed', str(weekly_report.get('workouts_completed', 0)))
+    m2.metric('Weekly Volume', f"{int(weekly_report.get('weekly_volume', 0)):,} lbs")
+    m3.metric('PRs Achieved', str(weekly_report.get('prs_achieved', 0)))
+    m4.metric('Consistency Score', f"{int(weekly_report.get('consistency_score', 0))}/100")
+
+    st.markdown('<div class="side-card">', unsafe_allow_html=True)
+    st.markdown('#### Recovery Summary')
+    st.caption(str(weekly_report.get('recovery_summary', 'N/A')))
+    st.markdown('#### Muscle Groups Trained')
+    st.caption(', '.join(weekly_report.get('muscles_trained', [])) or 'N/A')
+    st.markdown('#### Strongest Progress')
+    st.caption(', '.join(weekly_report.get('strongest_progress', [])) or 'None detected')
+    st.markdown('#### Exercises Stalled')
+    st.caption(', '.join(weekly_report.get('stalled_exercises', [])) or 'None detected')
+    st.markdown('#### Suggested Priorities for Next Week')
+    for p in weekly_report.get('priorities', []):
+        st.markdown(f"- {p}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    d1, d2 = st.columns(2)
+    d1.download_button(
+        'Download Weekly Report (Text)',
+        data=str(weekly_report.get('text_report', '')),
+        file_name=f"weekly_coaching_report_{str(date.today())}.txt",
+        mime='text/plain',
+        use_container_width=True,
+    )
+    d2.download_button(
+        'Download Weekly Report (HTML)',
+        data=str(weekly_report.get('html_report', '')),
+        file_name=f"weekly_coaching_report_{str(date.today())}.html",
+        mime='text/html',
+        use_container_width=True,
+    )
 
 elif page == "Workout Builder":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout Builder</div><div class="sub">Add exercises to your weekly plan without editing CSV files.</div></div>', unsafe_allow_html=True)
@@ -2076,6 +2794,13 @@ elif page == "Progress Analytics":
         unsafe_allow_html=True,
     )
 
+    st.markdown('### Recent PRs')
+    progress_prs = get_recent_pr_events(log, days=14)
+    if progress_prs.empty:
+        st.caption('No recent PRs yet.')
+    else:
+        st.dataframe(progress_prs.head(12), use_container_width=True)
+
     tab1, tab2, tab3, tab4 = st.tabs(['Strength', 'Body', 'Nutrition', 'Supplements'])
     with tab1:
         if log.empty:
@@ -2182,7 +2907,7 @@ elif page == "Exercise Library":
     import pages.exercise_library as exercise_library_page
 
     importlib.reload(exercise_library_page)
-    exercise_library_page.render_exercise_library_page(ASSETS)
+    exercise_library_page.render_exercise_library_page(ASSETS, workout_log_df=load_log())
 
 elif page == "History":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)

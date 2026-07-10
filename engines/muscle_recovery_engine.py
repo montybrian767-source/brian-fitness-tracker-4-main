@@ -109,8 +109,8 @@ def _status_for_score(score: float) -> str:
     if score >= 60:
         return "Moderate"
     if score >= 40:
-        return "Fatigued"
-    return "Recover"
+        return "Recovering"
+    return "Fatigued"
 
 
 def _action_for_status(status: str) -> str:
@@ -118,7 +118,7 @@ def _action_for_status(status: str) -> str:
         return "Train this muscle normally or heavy with clean form."
     if status == "Moderate":
         return "Train this muscle with normal load and controlled volume."
-    if status == "Fatigued":
+    if status == "Recovering":
         return "Reduce volume 20-30% and keep effort submaximal."
     return "Avoid heavy loading. Prioritize mobility, blood flow, and recovery work."
 
@@ -137,6 +137,7 @@ def build_muscle_recovery_snapshot(
     metrics = {
         m: {
             "weekly_volume": 0.0,
+            "sets_last_7_days": 0,
             "session_dates": set(),
             "last_trained": None,
         }
@@ -171,6 +172,7 @@ def build_muscle_recovery_snapshot(
                 metrics[muscle]["last_trained"] = row_date if metrics[muscle]["last_trained"] is None else max(metrics[muscle]["last_trained"], row_date)
                 if row_date >= week_cut:
                     metrics[muscle]["weekly_volume"] += max(0.0, volume)
+                    metrics[muscle]["sets_last_7_days"] += 1
                     metrics[muscle]["session_dates"].add(str(row_date.date()))
 
     muscle_output: Dict[str, Dict] = {}
@@ -180,6 +182,7 @@ def build_muscle_recovery_snapshot(
         days_since = 99 if last_trained is None else int((today - last_trained).days)
         weekly_volume = float(item["weekly_volume"])
         sessions = len(item["session_dates"])
+        sets_last_7 = int(item.get("sets_last_7_days", 0) or 0)
 
         if last_trained is None:
             score = _clamp(base_recovery + 16.0 + body_adj, 20.0, 100.0)
@@ -200,23 +203,27 @@ def build_muscle_recovery_snapshot(
             reason = f"{days_since}d since trained, weekly volume {int(weekly_volume):,}, soreness {soreness:.1f}/10."
 
         status = _status_for_score(score)
+        suggested_next_day = "Today" if days_since >= 3 else f"In {max(1, 3 - days_since)} day(s)"
         muscle_output[muscle] = {
             "muscle": muscle,
             "recovery_pct": int(round(score)),
             "status": status,
+            "training_estimate": "Training estimate only, not a medical assessment.",
             "reason": reason,
             "recommended_action": _action_for_status(status),
             "weekly_volume": int(round(weekly_volume)),
+            "sets_last_7_days": sets_last_7,
             "days_since_last_trained": None if days_since == 99 else days_since,
             "last_trained": None if last_trained is None else str(last_trained.date()),
+            "suggested_next_training_day": suggested_next_day,
         }
 
     ordered = sorted(muscle_output.values(), key=lambda x: x["recovery_pct"], reverse=True)
     top_ready = [m for m in ordered if m["status"] in {"Ready", "Moderate"}][:3]
-    top_fatigued = [m for m in reversed(ordered) if m["status"] in {"Fatigued", "Recover"}][:3]
+    top_fatigued = [m for m in reversed(ordered) if m["status"] in {"Fatigued", "Recovering"}][:3]
 
     focus = ", ".join([m["muscle"].title() for m in top_ready[:2]]) if top_ready else "Mobility + light cardio"
-    avoid = [m["muscle"] for m in top_fatigued if m["status"] == "Recover"]
+    avoid = [m["muscle"] for m in top_fatigued if m["status"] == "Fatigued"]
 
     if base_recovery >= 80 and len(avoid) == 0:
         train_mode = "train heavy"
