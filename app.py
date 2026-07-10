@@ -27,9 +27,15 @@ from engines.muscle_recovery_engine import build_muscle_recovery_snapshot
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot, normalize_muscle_name
 from engines.recovery_engine import RECOVERY_COLUMNS, get_latest_recovery
 from engines.smart_scale_engine import BODY_COLUMNS, dashboard_body_metrics
+from pages.apple_activity import render_apple_activity_page
 from services.supabase_service import (
     get_workouts,
     health_check,
+)
+from services.apple_health_import_service import (
+    get_apple_activity_daily,
+    get_apple_workouts,
+    get_import_summary,
 )
 from services.workout_save_service import (
     build_workout_session_id,
@@ -321,6 +327,7 @@ def get_mobile_primary_page() -> str:
         'Gym Mode': 'Gym Mode',
         'History': 'History',
         'Progress': 'Progress Analytics',
+        'Apple Activity': 'Apple Activity',
         'More': 'More',
     }
 
@@ -335,6 +342,7 @@ def get_mobile_primary_page() -> str:
     reverse = {
         "Today's Workout": 'Workout',
         'Progress Analytics': 'Progress',
+        'Apple Activity': 'More',
     }
     current_mobile = reverse.get(current, current if current in mapping else 'Dashboard')
 
@@ -361,6 +369,7 @@ def get_mobile_primary_page() -> str:
             'Workout Builder',
             'Weekly Plan',
             'Weekly Coaching Report',
+            'Apple Activity',
             'Recovery Center',
             'Nutrition',
             'Supplements',
@@ -896,7 +905,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
         priorities.append('Maintain current progression plan and prioritize execution quality.')
 
     lines = [
-        'Brian Fit 7.1 Weekly Coaching Report',
+        'Brian Fit 7.2 Weekly Coaching Report',
         f'Workouts completed: {workouts_completed}',
         f'Weekly volume: {weekly_volume:,} lbs',
         f'Muscle groups trained: {", ".join(muscles_trained) if muscles_trained else "N/A"}',
@@ -909,7 +918,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
     ] + [f'- {p}' for p in priorities]
     text_report = '\n'.join(lines)
 
-    html_report = '<h2>Brian Fit 7.1 Weekly Coaching Report</h2>'
+    html_report = '<h2>Brian Fit 7.2 Weekly Coaching Report</h2>'
     html_report += f'<p><b>Workouts completed:</b> {workouts_completed}<br><b>Weekly volume:</b> {weekly_volume:,} lbs<br><b>Muscle groups trained:</b> {", ".join(muscles_trained) if muscles_trained else "N/A"}<br><b>PRs achieved:</b> {prs_achieved}<br><b>Consistency score:</b> {consistency_score}/100</p>'
     html_report += f'<p><b>Strongest progress:</b> {", ".join(strongest_progress) if strongest_progress else "None detected"}<br><b>Exercises stalled:</b> {", ".join(stalled) if stalled else "None detected"}<br><b>Recovery summary:</b> {recovery_summary}</p>'
     html_report += '<h3>Suggested priorities for next week</h3><ul>' + ''.join([f'<li>{p}</li>' for p in priorities]) + '</ul>'
@@ -1386,8 +1395,8 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 7.1")
-st.sidebar.caption("X.15 AI Coach Experience")
+st.sidebar.markdown("## 🏋️ Brian Fit 7.2")
+st.sidebar.caption("X.16 Apple Activity Import")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 page = get_mobile_primary_page()
@@ -1473,7 +1482,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-        <div class="x-kicker">Brian Fit 7.1 • X.15 AI Coach Experience</div>
+        <div class="x-kicker">Brian Fit 7.2 • X.16 Apple Activity Import</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -1631,10 +1640,45 @@ elif page == "AI Personal Trainer":
     water_today = int(pd.to_numeric(today_nut.get('water_oz', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not today_nut.empty else 0
     protein_today = int(pd.to_numeric(today_nut.get('protein_g', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()) if not today_nut.empty else 0
 
+    apple_daily_df, apple_daily_error = get_apple_activity_daily()
+    apple_workouts_df, apple_workout_error = get_apple_workouts()
+    apple_summary = get_import_summary()
+
     rec_exercises = next_workout.get('recommended_exercises', []) or []
     muscles_df = pd.DataFrame(recovery_snapshot.get('muscles', {}).values())
     avg_recovery = int(muscles_df['recovery_pct'].mean()) if not muscles_df.empty and 'recovery_pct' in muscles_df.columns else 0
-    readiness_status = 'Ready' if avg_recovery >= 78 else ('Moderate' if avg_recovery >= 60 else ('Recovering' if avg_recovery >= 40 else 'Fatigued'))
+
+    latest_apple = {}
+    if not apple_daily_df.empty and 'activity_date' in apple_daily_df.columns:
+        apple_daily_df['activity_date'] = pd.to_datetime(apple_daily_df['activity_date'], errors='coerce')
+        apple_daily_df = apple_daily_df.dropna(subset=['activity_date']).sort_values('activity_date')
+        if not apple_daily_df.empty:
+            latest_apple = apple_daily_df.iloc[-1].to_dict()
+
+    apple_steps = float(latest_apple.get('steps', 0) or 0)
+    apple_active_energy = float(latest_apple.get('active_energy_kcal', 0) or 0)
+    apple_exercise_minutes = float(latest_apple.get('exercise_minutes', 0) or 0)
+    apple_stand_hours = float(latest_apple.get('stand_hours', 0) or 0)
+    apple_sleep_hours = float(latest_apple.get('sleep_hours', 0) or 0)
+    apple_recent_workout = ''
+    if not apple_workouts_df.empty and 'start_time' in apple_workouts_df.columns:
+        apple_workouts_df['start_time'] = pd.to_datetime(apple_workouts_df['start_time'], errors='coerce')
+        apple_workouts_df = apple_workouts_df.dropna(subset=['start_time']).sort_values('start_time')
+        if not apple_workouts_df.empty:
+            apple_recent_workout = str(apple_workouts_df.iloc[-1].get('workout_type', ''))
+
+    apple_adjustment = 0
+    if apple_sleep_hours and apple_sleep_hours < 6.5:
+        apple_adjustment -= 8
+    if apple_steps >= 12000 and apple_exercise_minutes >= 45:
+        apple_adjustment -= 5
+    if apple_active_energy >= 900:
+        apple_adjustment -= 4
+    if apple_stand_hours >= 10 and apple_exercise_minutes >= 60:
+        apple_adjustment -= 3
+
+    adjusted_recovery = max(0, min(100, avg_recovery + apple_adjustment))
+    readiness_status = 'Ready' if adjusted_recovery >= 78 else ('Moderate' if adjusted_recovery >= 60 else ('Recovering' if adjusted_recovery >= 40 else 'Fatigued'))
 
     recent_14 = cloud_log.copy()
     if not recent_14.empty:
@@ -1650,21 +1694,23 @@ elif page == "AI Personal Trainer":
         training_confidence = max(35, training_confidence - 20)
     elif avg_recent_rpe >= 8.5:
         training_confidence = max(40, training_confidence - 10)
+    if apple_adjustment < 0:
+        training_confidence = max(35, training_confidence + apple_adjustment)
 
     st.markdown('<div class="ai-coach-shell">', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="ai-hero">
-          <div class="ai-kicker">Brian Fit 7.1 • X.15 AI Coach Experience</div>
+          <div class="ai-kicker">Brian Fit 7.2 • X.16 Apple Activity Import</div>
           <div class="ai-greet">Good Morning Brian</div>
-          <div class="ai-sub">Recovery score {avg_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
+          <div class="ai-sub">Recovery score {adjusted_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     h1, h2, h3, h4 = st.columns(4)
-    h1.metric('Recovery Score', f"{avg_recovery}%")
+    h1.metric('Recovery Score', f"{adjusted_recovery}%")
     h2.metric('Readiness', readiness_status)
     h3.metric('Recommended Workout', str(next_workout.get('focus', 'N/A')))
     h4.metric('Estimated Duration', f"{int(next_workout.get('estimated_duration_min', 0))} min")
@@ -1676,6 +1722,23 @@ elif page == "AI Personal Trainer":
 
     if not bool(next_workout.get('has_sufficient_history')):
         st.info('Complete more workouts to improve personalized coaching.')
+
+    st.markdown('### Today\'s Activity Context')
+    if apple_daily_df.empty and apple_workouts_df.empty:
+        st.caption('No imported Apple Health data yet. Add a ZIP or export.xml on the Apple Activity page.')
+    else:
+        ac1, ac2, ac3 = st.columns(3)
+        ac1.metric('Steps', f"{int(apple_steps):,}")
+        ac2.metric('Active Calories', f"{int(apple_active_energy):,} kcal")
+        ac3.metric('Exercise Minutes', f"{int(apple_exercise_minutes):,} min")
+        ac4, ac5, ac6 = st.columns(3)
+        ac4.metric('Stand Hours', f"{apple_stand_hours:.1f}")
+        resting_hr = int(float(latest_apple.get('resting_heart_rate', 0) or 0))
+        ac5.metric('Resting HR', f"{resting_hr} bpm")
+        ac6.metric('Sleep', f"{apple_sleep_hours:.1f} hr")
+        st.caption('Training estimate based on imported Apple Health and Brian Fit history. Not a medical assessment.')
+        if apple_recent_workout:
+            st.markdown(f"<div class='ai-card'><div class='ai-card-title'>Recent Apple Workout</div><div class='small'>{apple_recent_workout}</div></div>", unsafe_allow_html=True)
 
     reason_line = str(next_workout.get('coaching_note', '')).strip()
     first_reason = ''
@@ -2357,7 +2420,7 @@ elif page == "AI Coach":
 
 
 elif page == "Weekly Coaching Report":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.1</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.2</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
     log_week = load_log()
     workouts_week = load_workouts()
     progression_week = analyze_progressive_overload(log_week, workouts_week)
@@ -2721,6 +2784,9 @@ elif page == "Recovery Center":
         body_path=BODY,
         workout_log_path=LOG,
     )
+
+elif page == "Apple Activity":
+    render_apple_activity_page()
 
 
 elif page == "Progress Analytics":
