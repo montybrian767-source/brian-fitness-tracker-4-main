@@ -27,4 +27,4 @@ def start_workout_button(label="💪 START TODAY'S WORKOUT"):
         unsafe_allow_html=True,
     )
 
-    return st.button(label, use_container_width=True)
+    return st.button(label, width='stretch')

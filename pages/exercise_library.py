@@ -166,7 +166,7 @@ def render_exercise_library_page(assets_dir: Path, workout_log_df: pd.DataFrame 
                 unsafe_allow_html=True,
             )
             label = f"{row['exercise']}\n{row['muscle_group']}"
-            if st.button(label, key=f"exercise_pick_{idx}", use_container_width=True):
+            if st.button(label, key=f"exercise_pick_{idx}", width='stretch'):
                 st.session_state.exercise_library_selected = str(row["exercise"])
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -202,4 +202,4 @@ def render_exercise_library_page(assets_dir: Path, workout_log_df: pd.DataFrame 
         c1.line_chart(recent_sessions.set_index("date")["weight_lbs"])
         c2.line_chart(recent_sessions.set_index("date")["reps"])
         c3.line_chart(recent_sessions.set_index("date")["volume"])
-        st.dataframe(recent_sessions, use_container_width=True)
+        st.dataframe(recent_sessions, width='stretch')

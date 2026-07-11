@@ -151,7 +151,7 @@ def render_body_stats_page():
         notes = st.text_input('Notes', placeholder='Energy, soreness, progress notes, or smart scale sync status', key='body_notes')
     
     # Save button
-    if st.button('💾 Save Body Stats', key='save_body_btn', use_container_width=True):
+    if st.button('💾 Save Body Stats', key='save_body_btn', width='stretch'):
         row = {
             'date': str(entry_date),
             'body_weight_lbs': weight if weight > 0 else '',
@@ -183,7 +183,7 @@ def render_body_stats_page():
     else:
         # Display last 50 entries
         display_df = body_df.tail(50).copy()
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width='stretch', hide_index=True)
         
         # Weight chart
         if 'body_weight_lbs' in display_df.columns:
@@ -193,7 +193,7 @@ def render_body_stats_page():
             
             if not chart_df.empty:
                 st.markdown('<div style="margin-top: 20px; font-size: 0.95rem; font-weight: 600; color: #dbeafe;">Weight Trend</div>', unsafe_allow_html=True)
-                st.line_chart(chart_df.set_index('date')['body_weight_lbs'], use_container_width=True)
+                st.line_chart(chart_df.set_index('date')['body_weight_lbs'], width='stretch')
     
     # Future Smart Scale Integration Placeholder
     st.markdown('<div style="margin-top: 32px;"></div>', unsafe_allow_html=True)

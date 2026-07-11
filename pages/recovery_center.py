@@ -150,7 +150,7 @@ def render_recovery_center(recovery_path: Path, nutrition_path: Path, body_path:
         body_weight = st.number_input("Body Weight", min_value=1.0, max_value=600.0, value=float(default_weight), step=0.5)
         body_fat = st.number_input("Body Fat %", min_value=1.0, max_value=80.0, value=float(default_body_fat), step=0.1)
 
-    if st.button("Compute Recovery", use_container_width=True):
+    if st.button("Compute Recovery", width='stretch'):
         payload = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sleep_hours": sleep_hours,
@@ -184,4 +184,4 @@ def render_recovery_center(recovery_path: Path, nutrition_path: Path, body_path:
     if hist.empty:
         st.info("No recovery entries yet. Compute your first readiness score above.")
     else:
-        st.dataframe(hist.tail(30)[RECOVERY_COLUMNS], use_container_width=True, hide_index=True)
+        st.dataframe(hist.tail(30)[RECOVERY_COLUMNS], width='stretch', hide_index=True)

@@ -67,23 +67,23 @@ def workout_command_center(
     complete = st.button(
         "✅ COMPLETE SET",
         key=f"{key_prefix}_complete_{idx}",
-        use_container_width=True,
+        width='stretch',
         disabled=bool(disable_actions),
     )
     
     # Navigation buttons
     nav1, nav2, nav3, nav4 = st.columns(4)
     with nav1:
-        prev_clicked = st.button("← Previous", key=f"{key_prefix}_prev_{idx}", disabled=(idx<=0), use_container_width=True)
+        prev_clicked = st.button("← Previous", key=f"{key_prefix}_prev_{idx}", disabled=(idx<=0), width='stretch')
     with nav2:
-        next_clicked = st.button("➡ NEXT EXERCISE", key=f"{key_prefix}_next_{idx}", disabled=(idx>=total-1), use_container_width=True)
+        next_clicked = st.button("➡ NEXT EXERCISE", key=f"{key_prefix}_next_{idx}", disabled=(idx>=total-1), width='stretch')
     with nav3:
         st.caption(f"Exercise {idx+1} of {total}")
     with nav4:
         finish_clicked = st.button(
             "🏁 Finish",
             key=f"{key_prefix}_finish_{idx}",
-            use_container_width=True,
+            width='stretch',
             disabled=bool(disable_actions),
         )
 

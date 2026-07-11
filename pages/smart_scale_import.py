@@ -52,7 +52,7 @@ def render_smart_scale_import_page(body_path: Path):
     with st.container(border=True):
         st.subheader("Renpho Cloud Sync (Optional)")
         st.caption("Uses local .env variables only: RENPHO_EMAIL and RENPHO_PASSWORD.")
-        if st.button("Sync Renpho Data", key="sync_renpho_data", use_container_width=True):
+        if st.button("Sync Renpho Data", key="sync_renpho_data", width='stretch'):
             result = sync_renpho_measurements(existing)
             if not result.ok:
                 if result.fallback:
@@ -148,7 +148,7 @@ def render_smart_scale_import_page(body_path: Path):
         st.warning("Date and Weight mappings are required to import.")
         return
 
-    if st.button("Import Smart Scale Data", use_container_width=True):
+    if st.button("Import Smart Scale Data", width='stretch'):
         preview = analyze_import(imported_raw, existing, manual_mapping, import_source=import_source)
         st.session_state.smart_scale_preview = {
             "mapping": manual_mapping,
@@ -182,9 +182,9 @@ def render_smart_scale_import_page(body_path: Path):
     if preview_state["preview_df"].empty:
         st.info("No new rows to add after duplicate and validation checks.")
     else:
-        st.dataframe(preview_state["preview_df"].head(10), use_container_width=True, hide_index=True)
+        st.dataframe(preview_state["preview_df"].head(10), width='stretch', hide_index=True)
 
-    if st.button("Confirm Import", type="primary", use_container_width=True):
+    if st.button("Confirm Import", type="primary", width='stretch'):
         candidates_df = preview_state["candidates_df"]
         if candidates_df.empty:
             st.info("Nothing new to import.")

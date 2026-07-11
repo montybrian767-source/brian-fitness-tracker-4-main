@@ -1,7 +1,7 @@
 
 from pathlib import Path
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from contextlib import contextmanager
 import base64
 import time
@@ -44,14 +44,17 @@ from services.apple_health_import_service import (
     get_daily_readiness_history,
     get_recent_apple_activity,
     get_recent_apple_workouts,
-    get_apple_workouts,
+    get_apple_workouts_dataframe,
     get_import_summary,
     save_daily_readiness_result,
 )
 from services.workout_save_service import (
     build_workout_session_id,
+    get_cardio_sessions,
     get_last_save_result,
+    save_cardio_session,
     save_completed_set,
+    save_mixed_workout,
     save_workout_session as unified_save_workout_session,
 )
 from engines.performance_intelligence import (
@@ -78,6 +81,7 @@ BODY = DATA / "body_stats.csv"
 SUPPLEMENTS = DATA / "supplement_log.csv"
 SUPPLEMENT_PLAN = DATA / "supplement_plan.csv"
 RECOVERY = DATA / "recovery_log.csv"
+CARDIO_LOG = DATA / "cardio_sessions.csv"
 
 st.set_page_config(page_title="Brian Fitness Tracker X", page_icon="🏋️", layout="wide", initial_sidebar_state="expanded")
 
@@ -124,7 +128,26 @@ def ensure_health_logs():
     ensure_csv(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes'])
     ensure_csv(SUPPLEMENT_PLAN, ['supplement','category','default_time','target_days_per_week','notes'])
     ensure_csv(RECOVERY, RECOVERY_COLUMNS)
+    ensure_csv(CARDIO_LOG, [
+        'created_at','workout_session_id','activity_date','start_time','end_time','activity_type','category','duration_minutes','distance_value','distance_unit',
+        'calories_burned','average_heart_rate','maximum_heart_rate','average_pace','average_speed','incline_percent',
+        'resistance_level','laps','pool_length','pool_length_unit','steps','rpe','notes','source','apple_workout_key','verified'
+    ])
 ensure_health_logs()
+
+
+WORKOUT_TYPE_OPTIONS = ['Strength', 'Cardio', 'Sport', 'Mixed']
+CARDIO_ACTIVITY_TYPES = [
+    'Walking', 'Running', 'Treadmill', 'Outdoor Cycling', 'Stationary Bike', 'Swimming', 'Elliptical',
+    'Stair Stepper', 'Rowing', 'HIIT', 'Other Cardio'
+]
+SPORT_ACTIVITY_TYPES = ['Pickleball', 'Tennis', 'Basketball', 'Soccer', 'Golf', 'Other Sport']
+ALL_ACTIVITY_TYPES = CARDIO_ACTIVITY_TYPES + SPORT_ACTIVITY_TYPES
+
+CARDIO_HISTORY_FILTERS = [
+    'All', 'Strength', 'Cardio', 'Sport', 'Mixed',
+    'Pickleball', 'Walking', 'Running', 'Cycling', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'
+]
 
 
 def _init_perf_state():
@@ -177,7 +200,35 @@ def get_exercise_intelligence_resource() -> ExerciseIntelligence:
 
 @st.cache_data(ttl=60)
 def cached_get_workouts(days: Optional[int] = 90):
-    return get_workouts(days=days)
+    try:
+        result = get_workouts(days=days)
+    except TypeError:
+        # Compatibility fallback for environments with older get_workouts signatures.
+        result = get_workouts()
+    except Exception as exc:
+        return [], str(exc)
+
+    if isinstance(result, tuple) and len(result) == 2:
+        rows, err = result
+    else:
+        rows, err = result, None
+
+    if err:
+        return [], err
+
+    rows = list(rows or [])
+    if isinstance(days, int) and days > 0:
+        cutoff = (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=int(days))).date()
+        filtered_rows = []
+        for row in rows:
+            workout_date = pd.to_datetime((row or {}).get('workout_date', (row or {}).get('date')), errors='coerce')
+            if pd.isna(workout_date):
+                continue
+            if workout_date.date() >= cutoff:
+                filtered_rows.append(row)
+        rows = filtered_rows
+
+    return rows, None
 
 
 @st.cache_data(ttl=60)
@@ -206,7 +257,13 @@ def cached_get_apple_activity_daily(days: int = 90):
 
 @st.cache_data(ttl=60)
 def cached_get_apple_workouts(days: int = 90):
-    df, err = get_apple_workouts()
+    cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=max(1, int(days)) - 1)
+    df, _, err = get_apple_workouts_dataframe(
+        date_from=cutoff.date().isoformat(),
+        date_to=None,
+        limit=2000,
+        offset=0,
+    )
     if err or df.empty:
         return df, err
     if 'start_time' not in df.columns:
@@ -214,7 +271,6 @@ def cached_get_apple_workouts(days: int = 90):
     tmp = df.copy()
     tmp['start_time'] = pd.to_datetime(tmp['start_time'], errors='coerce', utc=True)
     tmp = tmp.dropna(subset=['start_time'])
-    cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=max(1, int(days)) - 1)
     return tmp[tmp['start_time'] >= cutoff], err
 
 
@@ -400,9 +456,17 @@ def normalize_cloud_workouts(rows):
 
 def load_log(return_meta=False, days: Optional[int] = 90):
     with perf_section('workout history loading'):
-        cloud_rows, cloud_error = cached_get_workouts(days=days)
+        try:
+            cloud_rows, cloud_error = cached_get_workouts(days=days)
+        except TypeError:
+            # Last-resort compatibility path for stale cached wrappers in Cloud.
+            cloud_rows, cloud_error = cached_get_workouts()
+        except Exception as exc:
+            cloud_rows, cloud_error = [], str(exc)
     if cloud_error:
         df = load_log_local()
+        if df.empty:
+            st.info('Limited data mode: cloud history is temporarily unavailable. Showing local data if present.')
         if return_meta:
             return df, 'csv_fallback', cloud_error
         return df
@@ -417,6 +481,265 @@ def load_log(return_meta=False, days: Optional[int] = 90):
     if return_meta:
         return df, 'cloud', None
     return df
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or pd.isna(value):
+            return int(default)
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _to_text(value: Any, default: str = '') -> str:
+    if value is None:
+        return default
+    if isinstance(value, float) and pd.isna(value):
+        return default
+    return str(value)
+
+
+def _distance_to_miles(distance_value: float, distance_unit: str) -> float:
+    value = _to_float(distance_value, 0.0)
+    unit = _to_text(distance_unit, '').strip().lower()
+    if value <= 0:
+        return 0.0
+    if unit == 'miles':
+        return value
+    if unit == 'kilometers':
+        return value * 0.621371
+    if unit == 'meters':
+        return value * 0.000621371
+    if unit == 'yards':
+        return value * 0.000568182
+    return 0.0
+
+
+def _format_duration_min(minutes: float) -> str:
+    total = max(0, int(round(_to_float(minutes, 0.0))))
+    return f"{total} min"
+
+
+def _normalize_cardio_rows(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame(rows or [])
+    if df.empty:
+        return pd.DataFrame(columns=[
+            'created_at','workout_session_id','activity_date','start_time','end_time','activity_type','category','duration_minutes','distance_value','distance_unit',
+            'calories_burned','average_heart_rate','maximum_heart_rate','average_pace','average_speed','incline_percent',
+            'resistance_level','laps','pool_length','pool_length_unit','steps','rpe','notes','source','apple_workout_key','verified','distance_miles','calories_per_minute','distance_per_minute'
+        ])
+
+    if 'activity_date' not in df.columns:
+        df['activity_date'] = ''
+    df['activity_date'] = pd.to_datetime(df['activity_date'], errors='coerce').dt.date.astype(str)
+    if 'created_at' not in df.columns:
+        df['created_at'] = pd.NaT
+    df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce', utc=True)
+    for col in ['duration_minutes','distance_value','calories_burned','average_heart_rate','maximum_heart_rate','average_speed','incline_percent','resistance_level','laps','pool_length','steps','rpe']:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    for col in ['activity_type','category','distance_unit','average_pace','notes','source','apple_workout_key','workout_session_id','pool_length_unit']:
+        if col not in df.columns:
+            df[col] = ''
+        df[col] = df[col].astype(str)
+    for col in ['start_time', 'end_time']:
+        if col not in df.columns:
+            df[col] = pd.NaT
+        df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
+    if 'verified' not in df.columns:
+        df['verified'] = False
+    df['verified'] = df['verified'].astype(str).str.lower().isin(['true', '1', 'yes'])
+
+    df['distance_miles'] = df.apply(lambda r: _distance_to_miles(r.get('distance_value', 0), r.get('distance_unit', '')), axis=1)
+    duration_nonzero = df['duration_minutes'].replace(0, pd.NA)
+    df['calories_per_minute'] = (df['calories_burned'] / duration_nonzero).fillna(0)
+    df['distance_per_minute'] = (df['distance_miles'] / duration_nonzero).fillna(0)
+    return df
+
+
+def load_cardio_log(return_meta: bool = False, days: Optional[int] = 90, activity_type: Optional[str] = None):
+    rows, cloud_error, setup_warning = get_cardio_sessions(days=days, activity_type=activity_type)
+    df = _normalize_cardio_rows(rows)
+    source = 'cloud' if cloud_error is None else 'csv_fallback'
+    if return_meta:
+        return df, source, cloud_error, setup_warning
+    return df
+
+
+def get_pending_cardio(flow_key: str):
+    state_key = f'{flow_key}_pending_cardio'
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+    return st.session_state[state_key]
+
+
+def clear_pending_cardio(flow_key: str):
+    st.session_state[f'{flow_key}_pending_cardio'] = []
+
+
+def _derive_cardio_metrics(duration_minutes: float, distance_value: float, distance_unit: str) -> Dict[str, Any]:
+    duration = _to_float(duration_minutes, 0.0)
+    miles = _distance_to_miles(distance_value, distance_unit)
+    if duration <= 0:
+        return {'average_speed': None, 'average_pace': None, 'distance_miles': miles}
+
+    average_speed = None
+    average_pace = None
+    if miles > 0:
+        hours = duration / 60.0
+        if hours > 0:
+            average_speed = round(miles / hours, 2)
+        average_pace = f"{round(duration / miles, 2)} min/mi"
+    return {
+        'average_speed': average_speed,
+        'average_pace': average_pace,
+        'distance_miles': miles,
+    }
+
+
+def _apple_type_for_cardio(activity_type: str) -> str:
+    text = _to_text(activity_type, 'Other Cardio').strip()
+    mapping = {
+        'Stationary Bike': 'Cycling',
+        'Outdoor Cycling': 'Cycling',
+        'Cycling': 'Cycling',
+        'Treadmill': 'Running',
+        'Other Cardio': 'Other',
+        'Other Sport': 'Other',
+    }
+    return mapping.get(text, text)
+
+
+def match_cardio_to_apple_session(cardio_row: Dict[str, Any]) -> Dict[str, Any]:
+    activity_date = _to_text(cardio_row.get('activity_date', '')).strip()
+    if not activity_date:
+        return {'matched': False, 'reason': 'No activity date to match.'}
+
+    activity_type = _apple_type_for_cardio(_to_text(cardio_row.get('activity_type', 'Other Cardio')))
+    duration = _to_float(cardio_row.get('duration_minutes', 0.0), 0.0)
+
+    apple_df, _, err = get_apple_workouts_dataframe(
+        date_from=activity_date,
+        date_to=activity_date,
+        workout_type=activity_type,
+        limit=300,
+        offset=0,
+    )
+    if err:
+        return {'matched': False, 'reason': f'Apple query error: {err}'}
+    if apple_df.empty and activity_type != 'Other':
+        apple_df, _, _ = get_apple_workouts_dataframe(
+            date_from=activity_date,
+            date_to=activity_date,
+            workout_type='All',
+            limit=300,
+            offset=0,
+        )
+    if apple_df.empty:
+        return {'matched': False, 'reason': 'No Apple session found for same date.'}
+
+    tmp = apple_df.copy()
+    tmp['duration_minutes'] = pd.to_numeric(tmp.get('duration_minutes', 0), errors='coerce').fillna(0)
+    if duration > 0:
+        tmp['duration_diff'] = (tmp['duration_minutes'] - duration).abs()
+        tmp = tmp.sort_values('duration_diff')
+    else:
+        tmp['duration_diff'] = 999.0
+
+    best = tmp.iloc[0].to_dict()
+    if duration > 0 and _to_float(best.get('duration_diff', 999.0), 999.0) > 25:
+        return {'matched': False, 'reason': 'No Apple session within duration tolerance.'}
+
+    return {
+        'matched': True,
+        'reason': 'Matched by activity type/date/duration tolerance.',
+        'apple_row': {
+            'apple_workout_key': _to_text(best.get('apple_workout_key', '')),
+            'workout_type': _to_text(best.get('workout_type', '')),
+            'start_time': _to_text(best.get('start_time', '')),
+            'duration_minutes': _to_float(best.get('duration_minutes', 0.0), 0.0),
+            'total_energy_kcal': _to_float(best.get('total_energy_kcal', 0.0), 0.0),
+            'total_distance_miles': _to_float(best.get('total_distance_miles', 0.0), 0.0),
+            'average_heart_rate': _to_float(best.get('average_heart_rate', 0.0), 0.0),
+            'maximum_heart_rate': _to_float(best.get('maximum_heart_rate', 0.0), 0.0),
+        },
+    }
+
+
+def build_cardio_ai_insights(cardio_df: pd.DataFrame) -> Dict[str, Any]:
+    if cardio_df is None or cardio_df.empty:
+        return {
+            'weekly_minutes': 0,
+            'weekly_sessions': 0,
+            'load_modifier': 0,
+            'notes': ['Estimate: no cardio history logged yet.'],
+        }
+
+    df = cardio_df.copy()
+    df['activity_date'] = pd.to_datetime(df['activity_date'], errors='coerce')
+    df = df.dropna(subset=['activity_date'])
+    if df.empty:
+        return {
+            'weekly_minutes': 0,
+            'weekly_sessions': 0,
+            'load_modifier': 0,
+            'notes': ['Estimate: cardio dates were unavailable.'],
+        }
+
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=6)
+    week = df[df['activity_date'] >= cutoff].copy()
+    weekly_minutes = int(pd.to_numeric(week.get('duration_minutes', 0), errors='coerce').fillna(0).sum()) if not week.empty else 0
+    weekly_sessions = int(len(week)) if not week.empty else 0
+
+    notes: List[str] = []
+    load_modifier = 0
+
+    if weekly_minutes >= 240:
+        notes.append('Estimate: high cardio load this week may justify reducing strength volume by 10-20%.')
+        load_modifier -= 12
+    elif weekly_minutes >= 150:
+        notes.append('Estimate: moderate cardio load this week supports a slight strength-volume reduction.')
+        load_modifier -= 6
+
+    pickleball_week = week[week.get('activity_type', '').astype(str).isin(['Pickleball'])]
+    if not pickleball_week.empty and pickleball_week['duration_minutes'].sum() >= 120:
+        notes.append('Estimate: repeated long pickleball sessions may increase lower-body and calf fatigue.')
+        load_modifier -= 5
+
+    walking_minutes = float(week[week.get('activity_type', '').astype(str).isin(['Walking'])]['duration_minutes'].sum()) if not week.empty else 0.0
+    if walking_minutes > 0:
+        notes.append('Estimate: low-intensity walking adds small fatigue and can support recovery movement.')
+
+    hard_cycle = week[week.get('activity_type', '').astype(str).isin(['Cycling', 'Stationary Bike', 'Stair Stepper'])]
+    if not hard_cycle.empty and hard_cycle['duration_minutes'].sum() >= 90:
+        notes.append('Estimate: hard cycling/stair-stepper sessions may affect lower-body readiness.')
+        load_modifier -= 6
+
+    swim_week = week[week.get('activity_type', '').astype(str).isin(['Swimming'])]
+    if not swim_week.empty and swim_week['duration_minutes'].sum() >= 60:
+        notes.append('Estimate: swimming volume may affect shoulders and upper-back readiness.')
+        load_modifier -= 4
+
+    if not notes:
+        notes.append('Estimate: cardio load appears manageable for planned strength work.')
+
+    return {
+        'weekly_minutes': weekly_minutes,
+        'weekly_sessions': weekly_sessions,
+        'load_modifier': int(load_modifier),
+        'notes': notes,
+    }
 
 
 def get_supabase_credentials():
@@ -580,6 +903,7 @@ def get_mobile_primary_page() -> str:
         st.session_state['mobile_more_active'] = True
         more_options = [
             'AI Coach',
+            'Quick Log',
             'Workout Builder',
             'Weekly Plan',
             'Weekly Coaching Report',
@@ -646,19 +970,19 @@ def render_rest_timer(flow_key: str):
         st.success('Rest complete')
 
     b1, b2, b3, b4 = st.columns(4)
-    if b1.button('Start', key=f'{flow_key}_rest_start', use_container_width=True):
+    if b1.button('Start', key=f'{flow_key}_rest_start', width='stretch'):
         state['duration'] = int(selected_seconds)
         state['started_at'] = datetime.now() - pd.to_timedelta(int(state.get('duration', selected_seconds)) - int(state.get('remaining', selected_seconds)), unit='s')
         state['running'] = True
-    if b2.button('Pause', key=f'{flow_key}_rest_pause', use_container_width=True):
+    if b2.button('Pause', key=f'{flow_key}_rest_pause', width='stretch'):
         state['running'] = False
         state['started_at'] = None
-    if b3.button('Reset', key=f'{flow_key}_rest_reset', use_container_width=True):
+    if b3.button('Reset', key=f'{flow_key}_rest_reset', width='stretch'):
         state['duration'] = int(selected_seconds)
         state['remaining'] = int(selected_seconds)
         state['running'] = False
         state['started_at'] = None
-    if b4.button('Skip', key=f'{flow_key}_rest_skip', use_container_width=True):
+    if b4.button('Skip', key=f'{flow_key}_rest_skip', width='stretch'):
         state['remaining'] = 0
         state['running'] = False
         state['started_at'] = None
@@ -745,7 +1069,7 @@ def detect_session_prs(log_df: pd.DataFrame, session_sets: list[dict]) -> list[d
     return prs
 
 
-def render_session_summary(save_result: dict, session_sets: list[dict], flow_key: str):
+def render_session_summary(save_result: dict, session_sets: list[dict], flow_key: str, cardio_sessions: Optional[list[dict]] = None):
     started_at = st.session_state.get(f'{flow_key}_started_at')
     metrics = build_session_metrics(session_sets, started_at=started_at)
     historical = load_log()
@@ -838,6 +1162,60 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
     st.caption(f"Suggested next training day: {recovery_impact.get('suggested_next_training_day', str(date.today()))}")
     st.caption(str(recovery_impact.get('note', 'Training estimate only. Not a medical claim.')))
 
+    cardio_rows = list(cardio_sessions or [])
+    if cardio_rows:
+        cardio_df = _normalize_cardio_rows(cardio_rows)
+        total_cardio_duration = float(cardio_df['duration_minutes'].sum()) if not cardio_df.empty else 0.0
+        total_cardio_distance = float(cardio_df['distance_miles'].sum()) if not cardio_df.empty else 0.0
+        total_cardio_calories = float(cardio_df['calories_burned'].sum()) if not cardio_df.empty else 0.0
+        avg_cardio_hr = float(cardio_df[cardio_df['average_heart_rate'] > 0]['average_heart_rate'].mean()) if not cardio_df.empty else 0.0
+        max_cardio_hr = float(cardio_df['maximum_heart_rate'].max()) if not cardio_df.empty else 0.0
+        avg_cardio_rpe = float(cardio_df['rpe'].mean()) if not cardio_df.empty else 0.0
+        pace_display = cardio_df['average_pace'].dropna().astype(str)
+        pace_text = pace_display.iloc[-1] if not pace_display.empty else 'N/A'
+        speed_vals = cardio_df[cardio_df['average_speed'] > 0]['average_speed']
+        speed_text = f"{float(speed_vals.mean()):.2f} mph" if not speed_vals.empty else 'N/A'
+
+        st.markdown('### Cardio Summary')
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric('Activity Entries', str(len(cardio_df)))
+        c2.metric('Duration', _format_duration_min(total_cardio_duration))
+        c3.metric('Distance', f"{total_cardio_distance:.2f} mi")
+        c4.metric('Calories', f"{int(total_cardio_calories)} kcal")
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric('Average HR', f"{int(avg_cardio_hr) if avg_cardio_hr > 0 else 0} bpm")
+        c6.metric('Maximum HR', f"{int(max_cardio_hr) if max_cardio_hr > 0 else 0} bpm")
+        c7.metric('Pace', pace_text)
+        c8.metric('Speed', speed_text)
+        st.caption(f"Average cardio RPE: {avg_cardio_rpe:.1f}")
+
+        history_cardio = load_cardio_log(days=None)
+        if not history_cardio.empty:
+            last_entry = cardio_df.iloc[-1]
+            act = str(last_entry.get('activity_type', ''))
+            prior = history_cardio[(history_cardio['activity_type'].astype(str) == act) & (history_cardio['workout_session_id'].astype(str) != str(save_result.get('session_id', '')))]
+            if not prior.empty:
+                prior = prior.sort_values(['activity_date', 'created_at'])
+                prev = prior.iloc[-1]
+                prev_duration = _to_float(prev.get('duration_minutes', 0.0), 0.0)
+                prev_distance = _to_float(prev.get('distance_miles', 0.0), 0.0)
+                prev_cal = _to_float(prev.get('calories_burned', 0.0), 0.0)
+                st.markdown('### Comparison with Previous Session')
+                p1, p2, p3 = st.columns(3)
+                p1.metric('Duration Change', f"{_to_float(last_entry.get('duration_minutes', 0.0), 0.0) - prev_duration:+.1f} min")
+                p2.metric('Distance Change', f"{_to_float(last_entry.get('distance_miles', 0.0), 0.0) - prev_distance:+.2f} mi")
+                p3.metric('Calories Change', f"{_to_float(last_entry.get('calories_burned', 0.0), 0.0) - prev_cal:+.0f} kcal")
+
+            st.markdown('### Cardio Personal Bests')
+            pb1, pb2, pb3 = st.columns(3)
+            pb1.metric('Longest Cardio Session', f"{float(history_cardio['duration_minutes'].max() if not history_cardio.empty else 0):.1f} min")
+            pb2.metric('Longest Distance', f"{float(history_cardio['distance_miles'].max() if not history_cardio.empty else 0):.2f} mi")
+            pb3.metric('Highest Calories', f"{int(history_cardio['calories_burned'].max() if not history_cardio.empty else 0)} kcal")
+
+        total_workout_duration = int(metrics.get('duration_min', 0) + total_cardio_duration)
+        st.caption(f'Total workout duration estimate (strength + cardio): {total_workout_duration} min')
+
     if prs:
         st.markdown('### NEW PERSONAL RECORD')
         for p in prs[:6]:
@@ -863,16 +1241,249 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
             )
 
     c1, c2, c3 = st.columns(3)
-    if c1.button('View History', key=f'{flow_key}_summary_history', use_container_width=True):
+    if c1.button('View History', key=f'{flow_key}_summary_history', width='stretch'):
         st.session_state['main_nav'] = 'History'
         st.rerun()
-    if c2.button('View Progress', key=f'{flow_key}_summary_progress', use_container_width=True):
+    if c2.button('View Progress', key=f'{flow_key}_summary_progress', width='stretch'):
         st.session_state['main_nav'] = 'Progress Analytics'
         st.rerun()
-    if c3.button('Return to Dashboard', key=f'{flow_key}_summary_dashboard', use_container_width=True):
+    if c3.button('Return to Dashboard', key=f'{flow_key}_summary_dashboard', width='stretch'):
         st.session_state['main_nav'] = 'Dashboard'
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
+
+
+def render_workout_type_selector(flow_key: str, label: str = 'Workout Type') -> str:
+    key = f'{flow_key}_workout_type'
+    current = _to_text(st.session_state.get(key, 'Strength'), 'Strength')
+    if current not in WORKOUT_TYPE_OPTIONS:
+        current = 'Strength'
+    selected = st.radio(
+        label,
+        WORKOUT_TYPE_OPTIONS,
+        index=WORKOUT_TYPE_OPTIONS.index(current),
+        horizontal=True,
+        key=key,
+    )
+    return _to_text(selected, 'Strength')
+
+
+def _cardio_fields_for_activity(activity_type: str) -> Dict[str, bool]:
+    activity = _to_text(activity_type, 'Other Cardio')
+    base = {
+        'show_distance': activity in {'Walking', 'Running', 'Treadmill', 'Outdoor Cycling', 'Stationary Bike', 'Swimming', 'Elliptical', 'Rowing', 'Pickleball', 'Tennis'},
+        'show_pace': activity in {'Walking', 'Running', 'Treadmill'},
+        'show_speed': activity in {'Outdoor Cycling', 'Stationary Bike'},
+        'show_incline': activity in {'Walking', 'Running', 'Treadmill'},
+        'show_resistance': activity in {'Outdoor Cycling', 'Stationary Bike', 'Elliptical', 'Stair Stepper', 'Rowing'},
+        'show_laps': activity in {'Swimming'},
+        'show_pool': activity in {'Swimming'},
+        'show_steps': activity in {'Stair Stepper', 'Walking', 'Running', 'Treadmill'},
+        'show_hr': activity in {'Walking', 'Running', 'Treadmill', 'Outdoor Cycling', 'Stationary Bike', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing', 'Pickleball', 'Tennis', 'Basketball', 'Soccer', 'Golf', 'HIIT'},
+        'show_notes': activity in {'Pickleball', 'Tennis', 'Basketball', 'Soccer', 'Golf', 'Other Sport', 'Other Cardio'},
+    }
+    return base
+
+
+def render_cardio_logger(flow_key: str, session_id: str, mode_label: str = 'Cardio'):
+    st.markdown(f'### {mode_label} Logger')
+    st.markdown('#### Brian Fit Cardio Entry')
+
+    default_options = CARDIO_ACTIVITY_TYPES if mode_label.lower().startswith('cardio') else ALL_ACTIVITY_TYPES
+    activity = st.selectbox(
+        'Activity type',
+        default_options,
+        key=f'{flow_key}_cardio_activity_type',
+    )
+
+    qp = st.columns(6)
+    for idx, preset in enumerate([15, 30, 45, 60, 90]):
+        if qp[idx].button(f'{preset} min', key=f'{flow_key}_dur_{preset}', width='stretch'):
+            st.session_state[f'{flow_key}_duration_minutes'] = preset
+    qp[5].button('Custom', key=f'{flow_key}_dur_custom', width='stretch')
+
+    duration = st.number_input(
+        'Duration minutes',
+        min_value=1,
+        value=int(st.session_state.get(f'{flow_key}_duration_minutes', 30)),
+        step=1,
+        key=f'{flow_key}_duration_minutes',
+    )
+    rpe = st.slider('RPE', min_value=1, max_value=10, value=int(st.session_state.get(f'{flow_key}_rpe', 6)), key=f'{flow_key}_rpe')
+    selected_date = st.date_input('Date', value=st.session_state.get(f'{flow_key}_activity_date', date.today()), key=f'{flow_key}_activity_date')
+
+    fields = _cardio_fields_for_activity(activity)
+
+    distance_value = 0.0
+    distance_unit = ''
+    calories = 0.0
+    avg_hr = 0.0
+    max_hr = 0.0
+    avg_pace = ''
+    avg_speed = 0.0
+    incline = 0.0
+    resistance = 0.0
+    laps = 0.0
+    pool_length = 0.0
+    pool_length_unit = ''
+    steps = 0.0
+    notes = ''
+    start_time = None
+    end_time = None
+
+    with st.expander('Optional cardio fields', expanded=False):
+        if fields['show_distance']:
+            d1, d2 = st.columns([2, 1])
+            distance_value = d1.number_input('Distance', min_value=0.0, value=0.0, step=0.1, key=f'{flow_key}_distance_value')
+            distance_unit = d2.selectbox('Distance unit', ['miles', 'kilometers', 'meters', 'yards'], key=f'{flow_key}_distance_unit')
+
+        calories = st.number_input('Calories burned', min_value=0.0, value=0.0, step=5.0, key=f'{flow_key}_calories')
+
+        if fields['show_hr']:
+            h1, h2 = st.columns(2)
+            avg_hr = h1.number_input('Average HR', min_value=0.0, value=0.0, step=1.0, key=f'{flow_key}_avg_hr')
+            max_hr = h2.number_input('Maximum HR', min_value=0.0, value=0.0, step=1.0, key=f'{flow_key}_max_hr')
+
+        if fields['show_pace']:
+            avg_pace = st.text_input('Average pace', value='', placeholder='e.g. 12:15 /mi', key=f'{flow_key}_avg_pace')
+        if fields['show_speed']:
+            avg_speed = st.number_input('Average speed', min_value=0.0, value=0.0, step=0.1, key=f'{flow_key}_avg_speed')
+        if fields['show_incline']:
+            incline = st.number_input('Incline percentage', min_value=0.0, value=0.0, step=0.5, key=f'{flow_key}_incline')
+        if fields['show_resistance']:
+            resistance = st.number_input('Resistance level', min_value=0.0, value=0.0, step=0.5, key=f'{flow_key}_resistance')
+        if fields['show_laps']:
+            laps = st.number_input('Laps', min_value=0.0, value=0.0, step=1.0, key=f'{flow_key}_laps')
+        if fields.get('show_pool'):
+            p1, p2 = st.columns([2, 1])
+            pool_length = p1.number_input('Pool length', min_value=0.0, value=0.0, step=1.0, key=f'{flow_key}_pool_length')
+            pool_length_unit = p2.selectbox('Pool unit', ['yards', 'meters'], key=f'{flow_key}_pool_length_unit')
+        if fields['show_steps']:
+            steps = st.number_input('Steps', min_value=0.0, value=0.0, step=10.0, key=f'{flow_key}_steps')
+        use_times = st.checkbox('Add start/end times', value=False, key=f'{flow_key}_use_times')
+        if use_times:
+            default_start = st.session_state.get(f'{flow_key}_start_time', datetime.now().time().replace(second=0, microsecond=0))
+            default_end = st.session_state.get(f'{flow_key}_end_time', datetime.now().time().replace(second=0, microsecond=0))
+            t1, t2 = st.columns(2)
+            start_time = t1.time_input('Start time', value=default_start, key=f'{flow_key}_start_time')
+            end_time = t2.time_input('End time', value=default_end, key=f'{flow_key}_end_time')
+        if fields['show_notes'] or True:
+            notes = st.text_area('Notes', value='', key=f'{flow_key}_cardio_notes')
+
+    activity_date = str(selected_date)
+    derived = _derive_cardio_metrics(duration, distance_value, distance_unit)
+    if not avg_pace and derived.get('average_pace'):
+        avg_pace = _to_text(derived.get('average_pace', ''))
+    if avg_speed <= 0 and derived.get('average_speed'):
+        avg_speed = _to_float(derived.get('average_speed', 0.0), 0.0)
+
+    cardio_row = {
+        'workout_session_id': session_id,
+        'activity_date': activity_date,
+        'start_time': datetime.combine(selected_date, start_time).isoformat() if start_time else None,
+        'end_time': datetime.combine(selected_date, end_time).isoformat() if end_time else None,
+        'activity_type': activity,
+        'category': 'sport' if activity in SPORT_ACTIVITY_TYPES else 'cardio',
+        'duration_minutes': float(duration),
+        'distance_value': float(distance_value) if distance_value > 0 else None,
+        'distance_unit': distance_unit if distance_value > 0 else None,
+        'calories_burned': float(calories) if calories > 0 else None,
+        'average_heart_rate': float(avg_hr) if avg_hr > 0 else None,
+        'maximum_heart_rate': float(max_hr) if max_hr > 0 else None,
+        'average_pace': avg_pace or None,
+        'average_speed': float(avg_speed) if avg_speed > 0 else None,
+        'incline_percent': float(incline) if incline > 0 else None,
+        'resistance_level': float(resistance) if resistance > 0 else None,
+        'laps': float(laps) if laps > 0 else None,
+        'pool_length': float(pool_length) if pool_length > 0 else None,
+        'pool_length_unit': pool_length_unit if pool_length > 0 else None,
+        'steps': float(steps) if steps > 0 else None,
+        'rpe': float(rpe),
+        'notes': notes,
+        'source': 'Brian Fit',
+    }
+
+    ignore_match = bool(st.session_state.get(f'{flow_key}_ignore_apple', False))
+    apple_match = {'matched': False, 'reason': 'Apple match ignored for this entry.'} if ignore_match else match_cardio_to_apple_session(cardio_row)
+    use_apple_values = False
+    if apple_match.get('matched'):
+        apple_row = apple_match.get('apple_row', {})
+        st.markdown('#### Apple Watch Session Summary')
+        st.caption(
+            f"{_to_text(apple_row.get('workout_type', 'Workout'))} | {_format_duration_min(_to_float(apple_row.get('duration_minutes', 0.0), 0.0))} | "
+            f"{int(_to_float(apple_row.get('total_energy_kcal', 0.0), 0.0))} kcal | {round(_to_float(apple_row.get('total_distance_miles', 0.0), 0.0), 2)} mi"
+        )
+        use_apple_values = st.checkbox('Use Apple Watch values', value=False, key=f'{flow_key}_use_apple_values')
+        act1, act2, act3 = st.columns(3)
+        if act1.button('Link Apple Workout', key=f'{flow_key}_link_apple', width='stretch'):
+            cardio_row['apple_workout_key'] = _to_text(apple_row.get('apple_workout_key', ''))
+        if act2.button('Ignore Match', key=f'{flow_key}_ignore_apple', width='stretch'):
+            st.session_state[f'{flow_key}_ignore_apple'] = True
+        if act3.button('Choose Different Session', key=f'{flow_key}_choose_apple', width='stretch'):
+            st.session_state[f'{flow_key}_choose_apple'] = True
+        if st.session_state.get(f'{flow_key}_choose_apple', False):
+            apple_candidates, _, _ = get_apple_workouts_dataframe(
+                date_from=activity_date,
+                date_to=activity_date,
+                workout_type='All',
+                limit=300,
+                offset=0,
+            )
+            if not apple_candidates.empty:
+                apple_candidates = apple_candidates.copy()
+                apple_candidates['label'] = apple_candidates.apply(
+                    lambda r: f"{_to_text(r.get('workout_type', 'Workout'))} | {int(_to_float(r.get('duration_minutes', 0), 0))} min | {int(_to_float(r.get('total_energy_kcal', 0), 0))} kcal",
+                    axis=1,
+                )
+                idx = st.selectbox('Manual Apple session', list(range(len(apple_candidates))), format_func=lambda i: apple_candidates.iloc[i]['label'], key=f'{flow_key}_apple_manual_idx')
+                manual_row = apple_candidates.iloc[int(idx)].to_dict()
+                if st.button('Use selected Apple session', key=f'{flow_key}_apple_manual_apply', width='stretch'):
+                    cardio_row['apple_workout_key'] = _to_text(manual_row.get('apple_workout_key', ''))
+                    st.session_state[f'{flow_key}_choose_apple'] = False
+        if use_apple_values:
+            cardio_row['apple_workout_key'] = _to_text(apple_row.get('apple_workout_key', ''))
+            cardio_row['duration_minutes'] = _to_float(apple_row.get('duration_minutes', cardio_row['duration_minutes']), cardio_row['duration_minutes'])
+            cardio_row['calories_burned'] = _to_float(apple_row.get('total_energy_kcal', cardio_row.get('calories_burned', 0.0)), cardio_row.get('calories_burned', 0.0)) or None
+            miles = _to_float(apple_row.get('total_distance_miles', 0.0), 0.0)
+            if miles > 0:
+                cardio_row['distance_value'] = miles
+                cardio_row['distance_unit'] = 'miles'
+            cardio_row['average_heart_rate'] = _to_float(apple_row.get('average_heart_rate', cardio_row.get('average_heart_rate', 0.0)), cardio_row.get('average_heart_rate', 0.0)) or None
+            cardio_row['maximum_heart_rate'] = _to_float(apple_row.get('maximum_heart_rate', cardio_row.get('maximum_heart_rate', 0.0)), cardio_row.get('maximum_heart_rate', 0.0)) or None
+    else:
+        st.caption(_to_text(apple_match.get('reason', 'No Apple match found for this cardio entry.')))
+
+    saved = False
+    if st.button('Save Cardio Session', key=f'{flow_key}_save_cardio', width='stretch'):
+        save_result = save_cardio_session(cardio_row)
+        if save_result.get('ok'):
+            st.success('Cardio session saved.')
+            pending = get_pending_cardio(flow_key)
+            pending.append(dict(cardio_row))
+            saved = True
+        else:
+            warning = _to_text(save_result.get('setup_warning', '')).strip()
+            if warning:
+                st.warning(warning)
+            st.error(_to_text(save_result.get('cloud_error', 'Cardio save failed')))
+            if save_result.get('csv_backup_ok'):
+                st.info('Cardio entry was saved to local backup CSV.')
+
+    pending = get_pending_cardio(flow_key)
+    if pending:
+        p_df = _normalize_cardio_rows(pending)
+        st.caption(f'Pending cardio entries in this workout: {len(p_df)}')
+        st.dataframe(
+            p_df[['activity_date', 'activity_type', 'duration_minutes', 'distance_value', 'distance_unit', 'calories_burned', 'average_heart_rate', 'rpe']].tail(8),
+            width='stretch',
+            hide_index=True,
+        )
+
+    return {
+        'saved': bool(saved),
+        'cardio_row': cardio_row,
+        'apple_match': apple_match,
+    }
 
 
 def group_sessions(log_df: pd.DataFrame) -> pd.DataFrame:
@@ -1132,7 +1743,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
         priorities.append('Maintain current progression plan and prioritize execution quality.')
 
     lines = [
-        'Brian Fit 7.3 Weekly Coaching Report',
+        'Brian Fit 7.5 Weekly Coaching Report',
         f'Workouts completed: {workouts_completed}',
         f'Weekly volume: {weekly_volume:,} lbs',
         f'Muscle groups trained: {", ".join(muscles_trained) if muscles_trained else "N/A"}',
@@ -1145,7 +1756,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
     ] + [f'- {p}' for p in priorities]
     text_report = '\n'.join(lines)
 
-    html_report = '<h2>Brian Fit 7.3 Weekly Coaching Report</h2>'
+    html_report = '<h2>Brian Fit 7.5 Weekly Coaching Report</h2>'
     html_report += f'<p><b>Workouts completed:</b> {workouts_completed}<br><b>Weekly volume:</b> {weekly_volume:,} lbs<br><b>Muscle groups trained:</b> {", ".join(muscles_trained) if muscles_trained else "N/A"}<br><b>PRs achieved:</b> {prs_achieved}<br><b>Consistency score:</b> {consistency_score}/100</p>'
     html_report += f'<p><b>Strongest progress:</b> {", ".join(strongest_progress) if strongest_progress else "None detected"}<br><b>Exercises stalled:</b> {", ".join(stalled) if stalled else "None detected"}<br><b>Recovery summary:</b> {recovery_summary}</p>'
     html_report += '<h3>Suggested priorities for next week</h3><ul>' + ''.join([f'<li>{p}</li>' for p in priorities]) + '</ul>'
@@ -1184,6 +1795,7 @@ def get_pending_sets(flow_key: str):
 
 def clear_pending_sets(flow_key: str):
     st.session_state[f'{flow_key}_pending_sets'] = []
+    st.session_state[f'{flow_key}_pending_cardio'] = []
     st.session_state[f'{flow_key}_session_id'] = ''
 
 
@@ -1624,9 +2236,9 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
-nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 7.3")
-st.sidebar.caption("X.17 Recovery & Readiness Engine")
+nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Quick Log","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
+st.sidebar.markdown("## 🏋️ Brian Fit 7.5")
+st.sidebar.caption("X.19 Unified Strength + Cardio Logger")
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 page = get_mobile_primary_page()
@@ -1635,11 +2247,11 @@ st.session_state['perf_sections'] = {}
 
 needs_workouts = page in {
     'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
-    'Workout Builder', 'Weekly Plan', 'Weekly Coaching Report', 'Progress Analytics', 'History',
+    'Quick Log', 'Workout Builder', 'Weekly Plan', 'Weekly Coaching Report', 'Progress Analytics', 'History',
 }
 needs_log = page in {
     'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
-    'Workout Builder', 'Weekly Coaching Report', 'Progress Analytics', 'History', 'Recovery & Readiness',
+    'Quick Log', 'Workout Builder', 'Weekly Coaching Report', 'Progress Analytics', 'History', 'Recovery & Readiness',
 }
 needs_readiness = page in {'Dashboard', 'AI Personal Trainer', 'Recovery & Readiness'}
 
@@ -1738,7 +2350,7 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-                <div class="x-kicker">Brian Fit 7.3 • X.17 Recovery & Readiness Engine</div>
+                <div class="x-kicker">Brian Fit 7.5 • X.19 Unified Strength + Cardio Logger</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
@@ -1750,7 +2362,7 @@ if page == "Dashboard":
 
     start_col, _ = st.columns([0.28, 0.72])
     with start_col:
-        if st.button('▶ START WORKOUT', use_container_width=True, key='x8_start_workout'):
+        if st.button('▶ START WORKOUT', width='stretch', key='x8_start_workout'):
             st.session_state['main_nav'] = "Today's Workout"
             st.rerun()
 
@@ -1805,7 +2417,7 @@ if page == "Dashboard":
     rr1.metric('Sleep', f"{str(readiness_result.get('activity_context', {}).get('sleep_hours', 'N/A'))} hr")
     rr2.metric('HRV', f"{str(readiness_result.get('activity_context', {}).get('heart_rate_variability_ms', 'N/A'))} ms")
     rr3.metric('Resting HR', f"{str(readiness_result.get('activity_context', {}).get('resting_heart_rate', 'N/A'))} bpm")
-    if st.button('View Recovery Details', use_container_width=True, key='dashboard_view_recovery_details'):
+    if st.button('View Recovery Details', width='stretch', key='dashboard_view_recovery_details'):
         st.session_state['main_nav'] = 'Recovery & Readiness'
         st.rerun()
 
@@ -1882,17 +2494,19 @@ if page == "Dashboard":
                 st.info('No PRs yet. Complete workouts to unlock personal records.')
             else:
                 events_df = pd.DataFrame(events).drop_duplicates(subset=['date', 'exercise', 'records']).sort_values('date', ascending=False).head(12)
-                st.dataframe(events_df, use_container_width=True)
+                st.dataframe(events_df, width='stretch')
 
     st.markdown('### Recent PRs')
     recent_prs = get_recent_pr_events(log, days=14)
     if recent_prs.empty:
         st.caption('No recent PRs yet.')
     else:
-        st.dataframe(recent_prs.head(10), use_container_width=True)
+        st.dataframe(recent_prs.head(10), width='stretch')
 
 elif page == "AI Personal Trainer":
     cloud_log = load_log()
+    cardio_ai_df = load_cardio_log(days=90)
+    cardio_ai = build_cardio_ai_insights(cardio_ai_df)
     nutrition_df = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
     body_df = read_csv_safe(BODY, BODY_COLUMNS)
     recovery_df = read_csv_safe(RECOVERY, RECOVERY_COLUMNS)
@@ -1961,12 +2575,13 @@ elif page == "AI Personal Trainer":
         training_confidence = max(40, training_confidence - 10)
     if readiness_result.get('confidence_score') is not None:
         training_confidence = int(max(30, min(96, (training_confidence * 0.45) + (float(readiness_result.get('confidence_score', 0)) * 0.55))))
+    training_confidence = int(max(20, min(98, training_confidence + int(cardio_ai.get('load_modifier', 0) or 0))))
 
     st.markdown('<div class="ai-coach-shell">', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="ai-hero">
-                    <div class="ai-kicker">Brian Fit 7.3 • X.17 Recovery & Readiness Engine</div>
+                    <div class="ai-kicker">Brian Fit 7.5 • X.19 Unified Strength + Cardio Logger</div>
           <div class="ai-greet">Good Morning Brian</div>
           <div class="ai-sub">Recovery score {adjusted_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
         </div>
@@ -1981,7 +2596,7 @@ elif page == "AI Personal Trainer":
     h4.metric('Estimated Duration', f"{int(next_workout.get('estimated_duration_min', 0))} min")
 
     cta_col, conf_col = st.columns([1.2, 1])
-    if cta_col.button('Start Recommended Workout', use_container_width=True, key='ai71_start_recommended'):
+    if cta_col.button('Start Recommended Workout', width='stretch', key='ai71_start_recommended'):
         st.session_state['ai71_show_preview'] = True
     conf_col.markdown(f'<div class="ai-card"><div class="ai-card-title">Training Confidence</div><div class="ai-big">{int(training_confidence)}%</div><div class="small">Based on recent sessions, progression signals, and recovery trends.</div></div>', unsafe_allow_html=True)
 
@@ -2022,6 +2637,13 @@ elif page == "AI Personal Trainer":
         unsafe_allow_html=True,
     )
 
+    st.markdown('### Cardio Load Estimates')
+    cl1, cl2 = st.columns(2)
+    cl1.metric('Weekly cardio minutes', str(int(cardio_ai.get('weekly_minutes', 0) or 0)))
+    cl2.metric('Weekly cardio sessions', str(int(cardio_ai.get('weekly_sessions', 0) or 0)))
+    for note in cardio_ai.get('notes', []):
+        st.caption(note)
+
     reason_line = str(next_workout.get('coaching_note', '')).strip()
     first_reason = ''
     if rec_exercises:
@@ -2052,7 +2674,7 @@ elif page == "AI Personal Trainer":
         for ex in rec_exercises[:8]:
             st.markdown(f"- {ex.get('exercise')} • {int(ex.get('suggested_sets', 3) or 3)} sets • {ex.get('suggested_rep_range', '8-12')} • {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs")
         p1, p2 = st.columns(2)
-        if p1.button('Confirm and Load Workout', use_container_width=True, key='ai71_confirm_load'):
+        if p1.button('Confirm and Load Workout', width='stretch', key='ai71_confirm_load'):
             day_for_plan = str(date.today().strftime('%A'))
             rows = []
             for ex in rec_exercises:
@@ -2076,7 +2698,7 @@ elif page == "AI Personal Trainer":
             st.session_state['mobile_nav_override'] = 'Workout'
             st.session_state['main_nav'] = 'Gym Mode'
             st.rerun()
-        if p2.button('Cancel Preview', use_container_width=True, key='ai71_cancel_preview'):
+        if p2.button('Cancel Preview', width='stretch', key='ai71_cancel_preview'):
             st.session_state['ai71_show_preview'] = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
@@ -2231,7 +2853,7 @@ elif page == "AI Personal Trainer":
             st.markdown(f"**Date:** {s.get('date', '')}  ")
             st.markdown(f"**Workout focus:** {s.get('focus', '')}  ")
             st.markdown(f"**Exercises:** {int(s.get('exercises', 0))} • **Sets:** {int(s.get('sets', 0))} • **Total volume:** {int(float(s.get('total_volume', 0) or 0)):,} lbs • **Average RPE:** {float(s.get('avg_rpe', 0) or 0):.1f} • **PR count:** {pr_cnt}")
-            if st.button('View Details', key=f'ai_timeline_{sid}', use_container_width=True):
+            if st.button('View Details', key=f'ai_timeline_{sid}', width='stretch'):
                 st.session_state['ai_timeline_open'] = sid
             if str(st.session_state.get('ai_timeline_open', '')) == sid:
                 sess_rows = cloud_log.copy()
@@ -2252,13 +2874,13 @@ elif page == "AI Personal Trainer":
     g3.metric('Sleep Goal', '7.5 - 9.0 hours')
 
     mobile_actions = st.columns(3)
-    if mobile_actions[0].button('View Today\'s Plan', use_container_width=True, key='ai71_mobile_view_plan'):
+    if mobile_actions[0].button('View Today\'s Plan', width='stretch', key='ai71_mobile_view_plan'):
         st.session_state['main_nav'] = "Today's Workout"
         st.rerun()
-    if mobile_actions[1].button('View Recovery', use_container_width=True, key='ai71_mobile_recovery'):
+    if mobile_actions[1].button('View Recovery', width='stretch', key='ai71_mobile_recovery'):
         st.session_state['main_nav'] = 'Recovery & Readiness'
         st.rerun()
-    if mobile_actions[2].button('View Progress', use_container_width=True, key='ai71_mobile_progress'):
+    if mobile_actions[2].button('View Progress', width='stretch', key='ai71_mobile_progress'):
         st.session_state['main_nav'] = 'Progress Analytics'
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
@@ -2267,6 +2889,10 @@ elif page == "Today's Workout":
     day = st.selectbox("Workout Day", days, index=date.today().weekday() if date.today().weekday()<7 else 0, key="x6_day")
     active = get_active_workout_for_day(workouts, day)
     group = active.muscle_group.iloc[0] if not active.empty else "Recovery / Rest"
+    flow_key = 'x6'
+    session_id = make_workout_session_id(flow_key)
+    pending_sets = get_pending_sets(flow_key)
+    pending_cardio = get_pending_cardio(flow_key)
     log_now = load_log()
     completed_today = 0
     total_volume_today = 0
@@ -2288,12 +2914,53 @@ elif page == "Today's Workout":
     </div>
     """, unsafe_allow_html=True)
 
-    if active.empty:
+    workout_type = render_workout_type_selector(flow_key, label='Workout Category')
+
+    if workout_type in {'Cardio', 'Sport'}:
+        if workout_type == 'Sport':
+            st.caption('Sport mode logs duration, calories, heart rate, optional distance, and notes. Apple data remains separate unless you confirm linking values.')
+        render_cardio_logger(flow_key, session_id, mode_label=workout_type)
+        c_finish = st.button('Finish Cardio Workout', key='x6_finish_cardio_only', width='stretch')
+        if c_finish:
+            if not pending_cardio:
+                st.warning('Save at least one cardio entry before finishing.')
+            else:
+                mixed_result = save_mixed_workout([], pending_cardio)
+                cardio_result = mixed_result.get('cardio', {}) if isinstance(mixed_result, dict) else {}
+                if mixed_result.get('ok') or cardio_result.get('ok'):
+                    st.success('Cardio workout completed.')
+                    clear_pending_sets(flow_key)
+                else:
+                    setup_warning = _to_text(cardio_result.get('setup_warning', '')).strip()
+                    if setup_warning:
+                        st.warning(setup_warning)
+                    st.error(_to_text(cardio_result.get('cloud_error', 'Cardio finish verification failed.')))
+        summarize_perf(page)
+        st.stop()
+
+    if workout_type == 'Mixed' and active.empty:
+        st.info('No strength plan rows found for today. You can still log cardio entries in Mixed mode.')
+        render_cardio_logger(flow_key, session_id, mode_label='Cardio (Mixed)')
+        if st.button('Finish Mixed Workout', key='x6_finish_mixed_no_strength', width='stretch'):
+            if not pending_cardio:
+                st.warning('Save at least one cardio entry before finishing.')
+            else:
+                mixed_result = save_mixed_workout([], pending_cardio)
+                cardio_result = mixed_result.get('cardio', {}) if isinstance(mixed_result, dict) else {}
+                if mixed_result.get('ok') or cardio_result.get('ok'):
+                    st.success('Mixed workout completed.')
+                    clear_pending_sets(flow_key)
+                else:
+                    setup_warning = _to_text(mixed_result.get('setup_warning', '')).strip()
+                    if setup_warning:
+                        st.warning(setup_warning)
+                    st.error(_to_text(mixed_result.get('cloud_error', 'Mixed workout save failed.')))
+        summarize_perf(page)
+        st.stop()
+
+    if workout_type == 'Strength' and active.empty:
         st.success("Recovery day. Use mobility, walking, sauna, swimming, or rest.")
     else:
-        flow_key = 'x6'
-        session_id = make_workout_session_id(flow_key)
-        pending_sets = get_pending_sets(flow_key)
         saving_key = f'{flow_key}_saving'
         is_saving = bool(st.session_state.get(saving_key, False))
         if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
@@ -2419,46 +3086,70 @@ elif page == "Today's Workout":
         if result.get('finish'):
             st.session_state[saving_key] = True
             session_sets = list(pending_sets)
-            if not session_sets:
+            if not session_sets and not pending_cardio:
                 st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
             else:
-                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_workout')
-                if save_result.get('supabase_ok'):
-                    render_cloud_save_success(save_result)
-                    clear_pending_sets(flow_key)
+                if workout_type == 'Mixed':
+                    mixed_result = save_mixed_workout(session_sets, pending_cardio)
+                    if mixed_result.get('ok'):
+                        st.success('Mixed workout saved permanently')
+                        clear_pending_sets(flow_key)
+                    else:
+                        st.error(_to_text(mixed_result.get('cloud_error', 'Mixed workout save failed.')))
+                        setup_warning = _to_text(mixed_result.get('setup_warning', '')).strip()
+                        if setup_warning:
+                            st.warning(setup_warning)
                 else:
-                    render_cloud_save_failure(save_result)
+                    save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_workout')
+                    if save_result.get('supabase_ok'):
+                        render_cloud_save_success(save_result)
+                        clear_pending_sets(flow_key)
+                    else:
+                        render_cloud_save_failure(save_result)
             st.session_state[saving_key] = False
 
         nav1, nav2, nav3, nav4 = st.columns(4)
         with nav1:
-            if st.button("← Previous", use_container_width=True, disabled=st.session_state.x6_idx <= 0, key="x6_prev"):
+            if st.button("← Previous", width='stretch', disabled=st.session_state.x6_idx <= 0, key="x6_prev"):
                 st.session_state.x6_idx -= 1
                 st.rerun()
         with nav2:
-            if st.button("Next →", use_container_width=True, disabled=st.session_state.x6_idx >= len(active)-1, key="x6_next"):
+            if st.button("Next →", width='stretch', disabled=st.session_state.x6_idx >= len(active)-1, key="x6_next"):
                 st.session_state.x6_idx += 1
                 st.rerun()
         with nav3:
-            st.download_button("Export Log", LOG.read_bytes(), file_name="workout_log.csv", use_container_width=True, key="x6_export")
+            st.download_button("Export Log", LOG.read_bytes(), file_name="workout_log.csv", width='stretch', key="x6_export")
         with nav4:
             st.markdown('<div class="x6-finish">', unsafe_allow_html=True)
-            finish = st.button("🏁 Finish Workout", use_container_width=True, key="x6_finish", disabled=is_saving)
+            finish = st.button("🏁 Finish Workout", width='stretch', key="x6_finish", disabled=is_saving)
             st.markdown('</div>', unsafe_allow_html=True)
         if finish:
             st.session_state[saving_key] = True
             session_sets = list(pending_sets)
-            if not session_sets:
+            if not session_sets and not pending_cardio:
                 st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
             else:
-                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_button')
-                if save_result.get('supabase_ok'):
-                    render_cloud_save_success(save_result)
-                    render_session_summary(save_result, session_sets, flow_key=flow_key)
-                    clear_pending_sets(flow_key)
-                    st.session_state[f'{flow_key}_started_at'] = None
+                if workout_type == 'Mixed':
+                    mixed_result = save_mixed_workout(session_sets, pending_cardio)
+                    if mixed_result.get('ok'):
+                        st.success('Mixed workout saved permanently')
+                        render_session_summary({'session_id': session_id, 'session_id_supported': True, 'verified_rows': int(mixed_result.get('verified_rows', 0))}, session_sets, flow_key=flow_key, cardio_sessions=list(pending_cardio))
+                        clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_started_at'] = None
+                    else:
+                        st.error(_to_text(mixed_result.get('cloud_error', 'Mixed workout save failed.')))
+                        setup_warning = _to_text(mixed_result.get('setup_warning', '')).strip()
+                        if setup_warning:
+                            st.warning(setup_warning)
                 else:
-                    render_cloud_save_failure(save_result)
+                    save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='today_finish_button')
+                    if save_result.get('supabase_ok'):
+                        render_cloud_save_success(save_result)
+                        render_session_summary(save_result, session_sets, flow_key=flow_key)
+                        clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_started_at'] = None
+                    else:
+                        render_cloud_save_failure(save_result)
             st.session_state[saving_key] = False
 
         session_metrics = build_session_metrics(list(pending_sets), started_at=st.session_state.get(f'{flow_key}_started_at'))
@@ -2466,6 +3157,11 @@ elif page == "Today's Workout":
         m1.metric('Sets Completed', str(session_metrics.get('set_count', 0)))
         m2.metric('Session Volume', f"{int(session_metrics.get('total_volume', 0)):,} lbs")
         m3.metric('Session Duration', f"{int(session_metrics.get('duration_min', 0))} min")
+
+        if workout_type == 'Mixed':
+            st.markdown('### Mixed Workout Cardio Segment')
+            render_cardio_logger(flow_key, session_id, mode_label='Cardio (Mixed)')
+
         render_rest_timer(flow_key)
 
         st.markdown("### Workout Flow")
@@ -2479,13 +3175,55 @@ elif page == "Gym Mode":
     day = st.selectbox("Workout Day", days, index=date.today().weekday() if date.today().weekday()<7 else 0, key="gym_day")
     active = get_active_workout_for_day(workouts, day)
     group = active.muscle_group.iloc[0] if not active.empty else 'Recovery / Rest'
+    flow_key = 'gym'
+    session_id = make_workout_session_id(flow_key)
+    pending_sets = get_pending_sets(flow_key)
+    pending_cardio = get_pending_cardio(flow_key)
     st.markdown(f'<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Gym Mode</div><div class="sub">{day} — {group}. One exercise at a time with larger controls.</div></div>', unsafe_allow_html=True)
-    if active.empty:
+    workout_type = render_workout_type_selector(flow_key, label='Workout Category')
+
+    if workout_type in {'Cardio', 'Sport'}:
+        render_cardio_logger(flow_key, session_id, mode_label=workout_type)
+        if st.button('Finish Gym Cardio Workout', key='gym_finish_cardio_only', width='stretch'):
+            if not pending_cardio:
+                st.warning('Save at least one cardio entry before finishing.')
+            else:
+                mixed_result = save_mixed_workout([], pending_cardio)
+                cardio_result = mixed_result.get('cardio', {}) if isinstance(mixed_result, dict) else {}
+                if mixed_result.get('ok') or cardio_result.get('ok'):
+                    st.success('Gym cardio workout completed.')
+                    clear_pending_sets(flow_key)
+                else:
+                    setup_warning = _to_text(cardio_result.get('setup_warning', '')).strip()
+                    if setup_warning:
+                        st.warning(setup_warning)
+                    st.error(_to_text(cardio_result.get('cloud_error', 'Cardio finish verification failed.')))
+        summarize_perf(page)
+        st.stop()
+
+    if workout_type == 'Mixed' and active.empty:
+        st.info('No strength plan rows found for this day. You can still log cardio entries in Mixed mode.')
+        render_cardio_logger(flow_key, session_id, mode_label='Cardio (Mixed)')
+        if st.button('Finish Gym Mixed Workout', key='gym_finish_mixed_no_strength', width='stretch'):
+            if not pending_cardio:
+                st.warning('Save at least one cardio entry before finishing.')
+            else:
+                mixed_result = save_mixed_workout([], pending_cardio)
+                cardio_result = mixed_result.get('cardio', {}) if isinstance(mixed_result, dict) else {}
+                if mixed_result.get('ok') or cardio_result.get('ok'):
+                    st.success('Mixed gym workout completed.')
+                    clear_pending_sets(flow_key)
+                else:
+                    setup_warning = _to_text(mixed_result.get('setup_warning', '')).strip()
+                    if setup_warning:
+                        st.warning(setup_warning)
+                    st.error(_to_text(mixed_result.get('cloud_error', 'Mixed workout save failed.')))
+        summarize_perf(page)
+        st.stop()
+
+    if workout_type == 'Strength' and active.empty:
         st.success("Recovery day. Mobility, walking, sauna, swimming, or rest.")
     else:
-        flow_key = 'gym'
-        session_id = make_workout_session_id(flow_key)
-        pending_sets = get_pending_sets(flow_key)
         saving_key = f'{flow_key}_saving'
         is_saving = bool(st.session_state.get(saving_key, False))
         if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
@@ -2583,23 +3321,41 @@ elif page == "Gym Mode":
         if result.get('finish'):
             st.session_state[saving_key] = True
             session_sets = list(pending_sets)
-            if not session_sets:
+            if not session_sets and not pending_cardio:
                 st.warning('No completed sets in this session yet. Complete at least one set before finishing.')
             else:
-                save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='gym_finish_workout')
-                if save_result.get('supabase_ok'):
-                    render_cloud_save_success(save_result)
-                    render_session_summary(save_result, session_sets, flow_key=flow_key)
-                    clear_pending_sets(flow_key)
-                    st.session_state[f'{flow_key}_started_at'] = None
+                if workout_type == 'Mixed':
+                    mixed_result = save_mixed_workout(session_sets, pending_cardio)
+                    if mixed_result.get('ok'):
+                        st.success('Mixed gym workout saved permanently')
+                        render_session_summary({'session_id': session_id, 'session_id_supported': True, 'verified_rows': int(mixed_result.get('verified_rows', 0))}, session_sets, flow_key=flow_key, cardio_sessions=list(pending_cardio))
+                        clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_started_at'] = None
+                    else:
+                        st.error(_to_text(mixed_result.get('cloud_error', 'Mixed workout save failed.')))
+                        setup_warning = _to_text(mixed_result.get('setup_warning', '')).strip()
+                        if setup_warning:
+                            st.warning(setup_warning)
                 else:
-                    render_cloud_save_failure(save_result)
+                    save_result = save_rows_to_cloud_then_backup(session_sets, save_source_label='gym_finish_workout')
+                    if save_result.get('supabase_ok'):
+                        render_cloud_save_success(save_result)
+                        render_session_summary(save_result, session_sets, flow_key=flow_key)
+                        clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_started_at'] = None
+                    else:
+                        render_cloud_save_failure(save_result)
             st.session_state[saving_key] = False
         session_metrics = build_session_metrics(list(pending_sets), started_at=st.session_state.get(f'{flow_key}_started_at'))
         s1, s2, s3 = st.columns(3)
         s1.metric('Sets Completed', str(session_metrics.get('set_count', 0)))
         s2.metric('Session Volume', f"{int(session_metrics.get('total_volume', 0)):,} lbs")
         s3.metric('Session Duration', f"{int(session_metrics.get('duration_min', 0))} min")
+
+        if workout_type == 'Mixed':
+            st.markdown('### Mixed Workout Cardio Segment')
+            render_cardio_logger(flow_key, session_id, mode_label='Cardio (Mixed)')
+
         render_rest_timer(flow_key)
         n1,n2=st.columns(2)
         with n1:
@@ -2609,10 +3365,89 @@ elif page == "Gym Mode":
         st.markdown('</div>', unsafe_allow_html=True)
 
 
+elif page == "Quick Log":
+    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.5</div><div class="title">Quick Log</div><div class="sub">Fast one-column workout logging for strength, cardio, sport, or mixed sessions.</div></div>', unsafe_allow_html=True)
+    flow_key = 'quicklog'
+    session_id = make_workout_session_id(flow_key)
+    pending_cardio = get_pending_cardio(flow_key)
+    workout_type = render_workout_type_selector(flow_key, label='Workout Category')
+
+    if workout_type in {'Cardio', 'Sport'}:
+        render_cardio_logger(flow_key, session_id, mode_label=workout_type)
+        if st.button('Finish Quick Cardio Workout', key='quick_finish_cardio', width='stretch'):
+            if not pending_cardio:
+                st.warning('Save at least one cardio entry before finishing.')
+            else:
+                result = save_mixed_workout([], pending_cardio)
+                cardio_result = result.get('cardio', {}) if isinstance(result, dict) else {}
+                if result.get('ok') or cardio_result.get('ok'):
+                    st.success('Quick cardio workout saved permanently.')
+                    render_session_summary({'session_id': session_id, 'session_id_supported': True, 'verified_rows': int(result.get('verified_rows', 0))}, [], flow_key=flow_key, cardio_sessions=list(pending_cardio))
+                    clear_pending_sets(flow_key)
+                else:
+                    warning = _to_text(cardio_result.get('setup_warning', '')).strip()
+                    if warning:
+                        st.warning(warning)
+                    st.error(_to_text(cardio_result.get('cloud_error', 'Cardio save failed.')))
+
+    else:
+        st.markdown('### Quick Strength Entry')
+        day = st.selectbox('Workout Day', days, index=date.today().weekday() if date.today().weekday() < 7 else 0, key='quick_day')
+        exercise = st.text_input('Exercise', key='quick_exercise')
+        c1, c2, c3, c4 = st.columns(4)
+        weight = c1.number_input('Weight', min_value=0.0, value=0.0, step=5.0, key='quick_weight')
+        reps = c2.number_input('Reps', min_value=0, value=10, step=1, key='quick_reps')
+        set_number = c3.number_input('Set', min_value=1, value=1, step=1, key='quick_set')
+        rpe = c4.slider('RPE', min_value=1, max_value=10, value=7, key='quick_rpe')
+        body_feedback = st.slider('Body feedback score', min_value=0, max_value=10, value=2, key='quick_feedback')
+        feedback_notes = st.text_area('Body feedback notes', key='quick_feedback_notes')
+
+        if st.button('Save Quick Strength Set', key='quick_save_strength', width='stretch'):
+            if not str(exercise).strip():
+                st.warning('Exercise is required.')
+            else:
+                result = save_completed_set({
+                    'workout_date': str(date.today()),
+                    'day': day,
+                    'exercise': str(exercise).strip(),
+                    'set_number': int(set_number),
+                    'weight_lbs': float(weight),
+                    'reps': int(reps),
+                    'rpe': float(rpe),
+                    'body_feedback_score': int(body_feedback),
+                    'body_feedback_notes': str(feedback_notes or ''),
+                    'workout_session_id': session_id,
+                })
+                if result.get('ok'):
+                    st.success('Quick strength set saved permanently.')
+                else:
+                    st.error(_to_text(result.get('cloud_error', 'Strength save failed.')))
+
+        if workout_type == 'Mixed':
+            st.markdown('### Mixed Cardio Segment')
+            render_cardio_logger(flow_key, session_id, mode_label='Cardio (Mixed)')
+            if st.button('Finish Quick Mixed Workout', key='quick_finish_mixed', width='stretch'):
+                if not pending_cardio:
+                    st.warning('Save at least one cardio entry for mixed mode.')
+                else:
+                    result = save_mixed_workout([], pending_cardio)
+                    cardio_result = result.get('cardio', {}) if isinstance(result, dict) else {}
+                    if result.get('ok') or cardio_result.get('ok'):
+                        st.success('Quick mixed workout saved permanently.')
+                        render_session_summary({'session_id': session_id, 'session_id_supported': True, 'verified_rows': int(result.get('verified_rows', 0))}, [], flow_key=flow_key, cardio_sessions=list(pending_cardio))
+                        clear_pending_sets(flow_key)
+                    else:
+                        warning = _to_text(result.get('setup_warning', '')).strip()
+                        if warning:
+                            st.warning(warning)
+                        st.error(_to_text(result.get('cloud_error', 'Mixed save failed.')))
+
 elif page == "AI Coach":
     st.markdown('<div class="hero"><div class="kicker">PROJECT TITAN</div><div class="title">AI Coach Center</div><div class="sub">Central coaching brain powered by recovery, training, nutrition, body intelligence, supplements, and weekly performance data.</div></div>', unsafe_allow_html=True)
 
     log = load_log()
+    cardio_ai_df = load_cardio_log(days=90)
+    cardio_ai = build_cardio_ai_insights(cardio_ai_df)
     workouts_df = load_workouts()
     recovery_df = read_csv_safe(RECOVERY, RECOVERY_COLUMNS)
     nut = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
@@ -2640,6 +3475,9 @@ elif page == "AI Coach":
     st.markdown('## Training Guidance')
     st.markdown(f'<div class="side-card"><div class="side-title">Workout Intensity Recommendation</div><div class="small">{brief.workout_intensity_recommendation}</div></div>', unsafe_allow_html=True)
     st.markdown(f'<div class="side-card"><div class="side-title">Muscle Readiness Focus</div><div class="small"><b>Focus:</b> {brief.muscle_recovery_focus}</div><div class="small" style="margin-top:8px;"><b>Avoid:</b> {brief.avoid_muscles}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="side-card"><div class="side-title">Cardio Load Estimates</div><div class="small"><b>Weekly cardio minutes:</b> {int(cardio_ai.get("weekly_minutes", 0) or 0)}</div><div class="small"><b>Weekly cardio sessions:</b> {int(cardio_ai.get("weekly_sessions", 0) or 0)}</div></div>', unsafe_allow_html=True)
+    for note in cardio_ai.get('notes', []):
+        st.caption(note)
 
     st.markdown('## Nutrition Guidance')
     st.markdown(f'<div class="side-card"><div class="side-title">Nutrition Recommendation</div><div class="small">{brief.nutrition_recommendation}</div></div>', unsafe_allow_html=True)
@@ -2700,7 +3538,7 @@ elif page == "AI Coach":
 
 
 elif page == "Weekly Coaching Report":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.3</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.5</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
     log_week = load_log()
     workouts_week = load_workouts()
     progression_week = analyze_progressive_overload(log_week, workouts_week)
@@ -2738,18 +3576,25 @@ elif page == "Weekly Coaching Report":
         data=str(weekly_report.get('text_report', '')),
         file_name=f"weekly_coaching_report_{str(date.today())}.txt",
         mime='text/plain',
-        use_container_width=True,
+        width='stretch',
     )
     d2.download_button(
         'Download Weekly Report (HTML)',
         data=str(weekly_report.get('html_report', '')),
         file_name=f"weekly_coaching_report_{str(date.today())}.html",
         mime='text/html',
-        use_container_width=True,
+        width='stretch',
     )
 
 elif page == "Workout Builder":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout Builder</div><div class="sub">Add exercises to your weekly plan without editing CSV files.</div></div>', unsafe_allow_html=True)
+    builder_flow = 'builder'
+    builder_session_id = make_workout_session_id(builder_flow)
+    builder_type = render_workout_type_selector(builder_flow, label='Workout Category')
+    if builder_type in {'Cardio', 'Sport'}:
+        render_cardio_logger(builder_flow, builder_session_id, mode_label=builder_type)
+        st.caption('Strength plan editing is still available below if you switch to Strength or Mixed.')
+
     st.info("Use this page to add a new exercise to the weekly schedule. It updates data/workouts.csv.")
     library = workouts.copy()
     readiness_snapshot = build_muscle_readiness_snapshot(
@@ -2811,7 +3656,7 @@ elif page == "Workout Builder":
         shown['readiness_rank'] = shown['readiness_status'].map({'Green': 0, 'Yellow': 1, 'Orange': 2, 'Red': 3}).fillna(1)
         shown = shown.sort_values(['readiness_rank', 'day', 'exercise']).drop(columns=['readiness_rank'])
     st.markdown("### Current Plan Table")
-    st.dataframe(shown[['day','muscle_group','exercise','readiness_hint','target_sets','target_reps','base_weight','image_file']], use_container_width=True)
+    st.dataframe(shown[['day','muscle_group','exercise','readiness_hint','target_sets','target_reps','base_weight','image_file']], width='stretch')
 
     st.markdown("### Add Exercise to Plan")
     c1,c2,c3 = st.columns(3)
@@ -2888,7 +3733,7 @@ elif page == "System Check":
             issues.append("Duplicate exercises")
         else:
             st.success("No duplicate day/exercise rows.")
-        st.dataframe(df[['day','muscle_group','exercise','target_sets','target_reps','image_file']], use_container_width=True)
+        st.dataframe(df[['day','muscle_group','exercise','target_sets','target_reps','image_file']], width='stretch')
     st.markdown("## Image Validator")
     image_files=list(ASSETS.glob('*.png'))+list(ASSETS.glob('*.jpg'))+list(ASSETS.glob('*.jpeg'))
     st.write(f"Images installed: **{len(image_files)}**")
@@ -2900,7 +3745,7 @@ elif page == "System Check":
                 missing.append((r.get('exercise',''), img))
     if missing:
         st.warning(f"Missing mapped images: {len(missing)}")
-        st.dataframe(pd.DataFrame(missing, columns=['exercise','image_file']), use_container_width=True)
+        st.dataframe(pd.DataFrame(missing, columns=['exercise','image_file']), width='stretch')
         issues.append("Missing mapped images")
     else:
         st.success("All mapped workout images found.")
@@ -2951,7 +3796,7 @@ elif page == "Nutrition":
         st.markdown('<div class="side-card"><div class="side-title">Simple Goals</div><div class="small">Protein: 150g/day<br>Water: 100 oz/day<br>Calories: set based on goal weight</div></div>', unsafe_allow_html=True)
     st.markdown('### Nutrition History')
     if nut.empty: st.info('No nutrition entries saved yet.')
-    else: st.dataframe(nut.tail(100), use_container_width=True)
+    else: st.dataframe(nut.tail(100), width='stretch')
     if NUTRITION.exists(): st.download_button('Export nutrition_log.csv', NUTRITION.read_bytes(), file_name='nutrition_log.csv')
 
 elif page == "Supplements":
@@ -3020,7 +3865,7 @@ elif page == "Supplements":
                 <span class="supp-pill">{r.get('notes','')}</span>
             </div>''', unsafe_allow_html=True)
         with st.expander('View raw supplement plan table'):
-            st.dataframe(plan, use_container_width=True)
+            st.dataframe(plan, width='stretch')
         with st.expander('Add supplement to plan'):
             sname=st.text_input('Supplement name')
             cat=st.selectbox('Category', ['Performance','Protein','General','Workout','Recovery','Hydration','Other'])
@@ -3035,7 +3880,7 @@ elif page == "Supplements":
         if sup.empty:
             st.info('No supplement entries yet.')
         else:
-            st.dataframe(sup.tail(90), use_container_width=True)
+            st.dataframe(sup.tail(90), width='stretch')
             # Weekly consistency summary
             calc=sup.copy()
             for field in cols[1:-1]:
@@ -3043,7 +3888,7 @@ elif page == "Supplements":
             totals=calc[cols[1:-1]].sum().sort_values(ascending=False).reset_index()
             totals.columns=['supplement','times_taken']
             st.markdown('### Consistency Summary')
-            st.dataframe(totals, use_container_width=True)
+            st.dataframe(totals, width='stretch')
             st.download_button('Export supplement_log.csv', SUPPLEMENTS.read_bytes(), file_name='supplement_log.csv')
 
 elif page == "Body Stats":
@@ -3078,6 +3923,7 @@ elif page == "Apple Activity":
 elif page == "Progress Analytics":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Progress Engine</div><div class="sub">Personal records, volume trends, body stats, nutrition, and consistency analytics.</div></div>', unsafe_allow_html=True)
     log = load_log()
+    cardio_df, _, _, cardio_setup_warning = load_cardio_log(return_meta=True, days=None)
     nut = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
     body = read_csv_safe(BODY, ['date','body_weight_lbs','goal_weight_lbs','waist_in','notes'])
     sup = read_csv_safe(SUPPLEMENTS, ['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes'])
@@ -3151,9 +3997,12 @@ elif page == "Progress Analytics":
     if progress_prs.empty:
         st.caption('No recent PRs yet.')
     else:
-        st.dataframe(progress_prs.head(12), use_container_width=True)
+        st.dataframe(progress_prs.head(12), width='stretch')
 
-    tab1, tab2, tab3, tab4 = st.tabs(['Strength', 'Body', 'Nutrition', 'Supplements'])
+    if cardio_setup_warning:
+        st.warning(cardio_setup_warning)
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Strength', 'Cardio', 'Body', 'Nutrition', 'Supplements'])
     with tab1:
         if log.empty:
             st.info('No workout history yet. Save workouts to unlock strength analytics.')
@@ -3200,7 +4049,7 @@ elif page == "Progress Analytics":
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown('### Personal Records')
-                st.dataframe(pr_summary.get('rows', pd.DataFrame()), use_container_width=True)
+                st.dataframe(pr_summary.get('rows', pd.DataFrame()), width='stretch')
             with c2:
                 st.markdown('### Top Exercises by Volume')
                 top = log.groupby('exercise', as_index=False)['volume'].sum().sort_values('volume', ascending=False).head(15)
@@ -3215,6 +4064,83 @@ elif page == "Progress Analytics":
             st.markdown('### Coach Notes')
             st.markdown('<div class="side-card"><div class="side-title">Smart Progress Read</div><div class="small">If you complete all target reps with body feedback under 3/10 and RPE under 8, increase next week by 5 lb for upper-body machines or 2.5 lb for cable movements.</div></div>', unsafe_allow_html=True)
     with tab2:
+        if cardio_df.empty:
+            st.info('No cardio history yet. Log cardio in Today\'s Workout, Gym Mode, or Workout Builder.')
+        else:
+            cdf = cardio_df.copy()
+            cdf['activity_date'] = pd.to_datetime(cdf['activity_date'], errors='coerce')
+            cdf = cdf.dropna(subset=['activity_date'])
+            if cdf.empty:
+                st.info('No valid cardio dates available.')
+            else:
+                cdf['week'] = cdf['activity_date'].dt.to_period('W').astype(str)
+                cdf['month'] = cdf['activity_date'].dt.to_period('M').astype(str)
+
+                weekly = cdf.groupby('week', as_index=False).agg(
+                    minutes=('duration_minutes', 'sum'),
+                    sessions=('activity_type', 'count'),
+                    distance_miles=('distance_miles', 'sum'),
+                    calories=('calories_burned', 'sum'),
+                )
+
+                st.markdown('### Cardio Minutes by Week')
+                st.line_chart(weekly.set_index('week')['minutes'])
+                st.markdown('### Sessions by Week')
+                st.bar_chart(weekly.set_index('week')['sessions'])
+                st.markdown('### Distance by Week')
+                st.line_chart(weekly.set_index('week')['distance_miles'])
+                st.markdown('### Calories by Week')
+                st.line_chart(weekly.set_index('week')['calories'])
+
+                hr_df = cdf[cdf['average_heart_rate'] > 0].groupby('activity_date', as_index=False)['average_heart_rate'].mean()
+                if not hr_df.empty:
+                    st.markdown('### Average Heart Rate Trend')
+                    st.line_chart(hr_df.set_index('activity_date')['average_heart_rate'])
+
+                rpe_df = cdf[cdf['rpe'] > 0].groupby('activity_date', as_index=False)['rpe'].mean()
+                if not rpe_df.empty:
+                    st.markdown('### RPE Trend')
+                    st.line_chart(rpe_df.set_index('activity_date')['rpe'])
+
+                pace_df = cdf[cdf['average_pace'].astype(str).str.strip().ne('')][['activity_date', 'average_pace']].tail(120)
+                if not pace_df.empty:
+                    st.markdown('### Pace Trend')
+                    st.dataframe(pace_df, width='stretch', hide_index=True)
+
+                speed_df = cdf[cdf['average_speed'] > 0].groupby('activity_date', as_index=False)['average_speed'].mean()
+                if not speed_df.empty:
+                    st.markdown('### Speed Trend')
+                    st.line_chart(speed_df.set_index('activity_date')['average_speed'])
+
+                st.markdown('### Cardio Activity Distribution')
+                dist = cdf.groupby('activity_type', as_index=False).size().rename(columns={'size': 'sessions'}).sort_values('sessions', ascending=False)
+                st.bar_chart(dist.set_index('activity_type')['sessions'])
+
+                pkl = cdf[cdf['activity_type'] == 'Pickleball'].groupby('month', as_index=False)['duration_minutes'].sum()
+                if not pkl.empty:
+                    pkl['hours'] = pkl['duration_minutes'] / 60.0
+                    st.markdown('### Pickleball Hours by Month')
+                    st.bar_chart(pkl.set_index('month')['hours'])
+
+                walk = cdf[cdf['activity_type'] == 'Walking'].groupby('month', as_index=False)['distance_miles'].sum()
+                if not walk.empty:
+                    st.markdown('### Walking Distance by Month')
+                    st.bar_chart(walk.set_index('month')['distance_miles'])
+
+                cycle = cdf[cdf['activity_type'].isin(['Cycling', 'Stationary Bike'])].groupby('month', as_index=False)['distance_miles'].sum()
+                if not cycle.empty:
+                    st.markdown('### Cycling Distance by Month')
+                    st.bar_chart(cycle.set_index('month')['distance_miles'])
+
+                swim = cdf[cdf['activity_type'] == 'Swimming'].groupby('month', as_index=False)['duration_minutes'].sum()
+                if not swim.empty:
+                    st.markdown('### Swimming Minutes by Month')
+                    st.bar_chart(swim.set_index('month')['duration_minutes'])
+
+                st.markdown('### Cardio Data Table')
+                st.dataframe(cdf[['activity_date', 'activity_type', 'duration_minutes', 'distance_value', 'distance_unit', 'calories_burned', 'average_heart_rate', 'average_pace', 'average_speed', 'rpe', 'source']].sort_values('activity_date', ascending=False).head(500), width='stretch')
+
+    with tab3:
         if body.empty:
             st.info('No body stats yet. Use Body Stats page to start tracking weight and waist.')
         else:
@@ -3223,8 +4149,8 @@ elif page == "Progress Analytics":
             if not bw.empty:
                 st.line_chart(bw.set_index('date')['body_weight_lbs'])
             st.markdown('### Body Stats Table')
-            st.dataframe(body.tail(100), use_container_width=True)
-    with tab3:
+            st.dataframe(body.tail(100), width='stretch')
+    with tab4:
         if nut.empty:
             st.info('No nutrition entries yet. Use Nutrition page to start tracking calories and protein.')
         else:
@@ -3237,8 +4163,8 @@ elif page == "Progress Analytics":
             with c2:
                 st.line_chart(daily_nut.set_index('date')['calories'])
                 st.caption('Calories per day')
-            st.dataframe(daily_nut.tail(30), use_container_width=True)
-    with tab4:
+            st.dataframe(daily_nut.tail(30), width='stretch')
+    with tab5:
         if sup.empty:
             st.info('No supplement entries yet. Use Supplements page to start tracking consistency.')
         else:
@@ -3251,7 +4177,7 @@ elif page == "Progress Analytics":
             totals.columns=['supplement','times_taken']
             st.markdown('### Supplement Consistency')
             st.bar_chart(totals.set_index('supplement')['times_taken'])
-            st.dataframe(totals, use_container_width=True)
+            st.dataframe(totals, width='stretch')
 
 elif page == "Exercise Library":
     # Ensure Exercise Library route always uses latest page/component code on rerun.
@@ -3266,15 +4192,64 @@ elif page == "History":
     full_history = st.checkbox('Load full history (slower)', value=False, key='history_full_range')
     history_days = None if full_history else 90
     log, source, cloud_error = load_log(return_meta=True, days=history_days)
+    cardio_filter = st.selectbox('Cardio Filter', CARDIO_HISTORY_FILTERS, index=0, key='history_cardio_filter')
+    cardio_type = None
+    show_strength = cardio_filter in {'All', 'Strength', 'Mixed'}
+    show_cardio = cardio_filter in {'All', 'Cardio', 'Sport', 'Mixed', 'Pickleball', 'Walking', 'Running', 'Cycling', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'}
+    show_apple = cardio_filter in {'All', 'Cardio', 'Sport', 'Mixed', 'Pickleball', 'Walking', 'Running', 'Cycling', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'}
+    sport_types = {'Pickleball', 'Tennis', 'Basketball', 'Soccer', 'Golf', 'Other Sport'}
+    cardio_types = {'Walking', 'Running', 'Treadmill', 'Outdoor Cycling', 'Cycling', 'Stationary Bike', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing', 'HIIT', 'Other Cardio'}
+    if cardio_filter in {'Pickleball', 'Walking', 'Running', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'}:
+        cardio_type = cardio_filter
+    cardio_df, cardio_source, cardio_error, cardio_setup_warning = load_cardio_log(return_meta=True, days=history_days, activity_type=cardio_type)
+    apple_days = 90 if history_days is None else int(history_days)
+    apple_df, apple_err = cached_get_apple_workouts(days=apple_days)
+    apple_df = apple_df if isinstance(apple_df, pd.DataFrame) else pd.DataFrame()
+    if not apple_df.empty:
+        apple_df = apple_df.copy()
+        apple_df['activity_type'] = apple_df.get('workout_type', '').astype(str)
+        apple_df['activity_date'] = pd.to_datetime(apple_df.get('start_time'), errors='coerce', utc=True).dt.date.astype(str)
+        if cardio_filter == 'Pickleball':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower() == 'pickleball']
+        elif cardio_filter == 'Walking':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('walk', na=False)]
+        elif cardio_filter == 'Running':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('run', na=False)]
+        elif cardio_filter == 'Cycling':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('cycl', na=False)]
+        elif cardio_filter == 'Swimming':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('swim', na=False)]
+        elif cardio_filter == 'Elliptical':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('elliptical', na=False)]
+        elif cardio_filter == 'Stair Stepper':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('stair', na=False)]
+        elif cardio_filter == 'Rowing':
+            apple_df = apple_df[apple_df['activity_type'].astype(str).str.lower().str.contains('row', na=False)]
     if source == 'cloud':
         st.caption('Source: Supabase Cloud')
     else:
         st.caption('Source: Local CSV Backup')
     if source == 'csv_fallback' and cloud_error:
         st.warning('Cloud unavailable')
+    if cardio_setup_warning:
+        st.warning(cardio_setup_warning)
+    if cardio_error:
+        st.caption(f'Cardio data note: {cardio_error}')
+    if cardio_source == 'cloud':
+        st.caption('Cardio Source: Supabase Cloud')
+    else:
+        st.caption('Cardio Source: Local CSV Backup')
     if source == 'csv_fallback_empty_cloud':
         st.info('Supabase returned no rows. Showing local CSV backup.')
-    if log.empty:
+    if show_strength and not log.empty:
+        if cardio_filter == 'Mixed' and not cardio_df.empty and 'workout_session_id' in log.columns and 'workout_session_id' in cardio_df.columns:
+            mixed_ids = set(cardio_df['workout_session_id'].astype(str).str.strip().tolist())
+            log = log[log['workout_session_id'].astype(str).str.strip().isin(mixed_ids)]
+        elif cardio_filter not in {'All', 'Strength', 'Mixed'}:
+            log = pd.DataFrame(columns=log.columns)
+
+    st.markdown('### Brian Fit Strength Sessions')
+    if not show_strength or log.empty:
         st.info('No workouts saved yet.')
     else:
         display_log = log.copy()
@@ -3303,7 +4278,7 @@ elif page == "History":
                     'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume','workout_session_id'
                 ]
                 cols = [c for c in preferred_cols if c in session_rows.columns]
-                st.dataframe(session_rows[cols], use_container_width=True)
+                st.dataframe(session_rows[cols], width='stretch')
             st.markdown('</div>', unsafe_allow_html=True)
 
         with st.expander('Raw data view'):
@@ -3311,7 +4286,59 @@ elif page == "History":
                 'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume','workout_session_id'
             ]
             cols = [c for c in preferred_cols if c in display_log.columns]
-            st.dataframe(display_log.tail(400)[cols], use_container_width=True)
+            st.dataframe(display_log.tail(400)[cols], width='stretch')
+
+    if show_cardio and cardio_filter == 'Cardio':
+        cardio_df = cardio_df[cardio_df['activity_type'].isin(list(cardio_types))]
+    if show_cardio and cardio_filter == 'Sport':
+        cardio_df = cardio_df[cardio_df['activity_type'].isin(list(sport_types))]
+    if show_cardio and cardio_filter == 'Cycling':
+        cardio_df = cardio_df[cardio_df['activity_type'].isin(['Outdoor Cycling', 'Cycling', 'Stationary Bike'])]
+
+    st.markdown('### Brian Fit Cardio Sessions')
+    if not show_cardio or cardio_df.empty:
+        st.info('No cardio sessions found for selected filter/date range.')
+    else:
+        show_cols = ['activity_date', 'activity_type', 'duration_minutes', 'distance_value', 'distance_unit', 'calories_burned', 'average_heart_rate', 'rpe', 'source', 'apple_workout_key']
+        for _, row in cardio_df.sort_values(['activity_date', 'created_at'], ascending=False).head(300).iterrows():
+            st.markdown('<div class="history-session-card">', unsafe_allow_html=True)
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric('Date', _to_text(row.get('activity_date', '')))
+            h2.metric('Activity', _to_text(row.get('activity_type', 'Other Cardio')))
+            h3.metric('Duration', _format_duration_min(_to_float(row.get('duration_minutes', 0.0), 0.0)))
+            h4.metric('RPE', f"{_to_float(row.get('rpe', 0.0), 0.0):.1f}")
+
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric('Distance', f"{_to_float(row.get('distance_value', 0.0), 0.0):.2f} {_to_text(row.get('distance_unit', ''))}".strip())
+            b2.metric('Calories', f"{int(_to_float(row.get('calories_burned', 0.0), 0.0))}")
+            b3.metric('Avg HR', f"{int(_to_float(row.get('average_heart_rate', 0.0), 0.0))}")
+            b4.metric('Source', _to_text(row.get('source', 'Brian Fit')))
+
+            linked = bool(_to_text(row.get('apple_workout_key', '')).strip())
+            st.caption(f"Linked Apple workout: {'Yes' if linked else 'No'}")
+            with st.expander('Open cardio entry details'):
+                detail = {k: row.get(k) for k in show_cols if k in row.index}
+                st.write(detail)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('### Apple Health Workouts')
+    if apple_err:
+        st.caption(f'Apple workout note: {apple_err}')
+    if not show_apple or apple_df.empty:
+        st.info('No Apple workouts found for selected filter/date range.')
+    else:
+        for _, row in apple_df.sort_values('start_time', ascending=False).head(300).iterrows():
+            st.markdown('<div class="history-session-card">', unsafe_allow_html=True)
+            a1, a2, a3, a4 = st.columns(4)
+            a1.metric('Date', _to_text(row.get('activity_date', '')))
+            a2.metric('Activity', _to_text(row.get('activity_type', 'Workout')))
+            a3.metric('Duration', _format_duration_min(_to_float(row.get('duration_minutes', 0.0), 0.0)))
+            a4.metric('Source', 'Apple Health')
+            b1, b2, b3 = st.columns(3)
+            b1.metric('Calories', f"{int(_to_float(row.get('total_energy_kcal', 0.0), 0.0))}")
+            b2.metric('Distance', f"{_to_float(row.get('total_distance_miles', 0.0), 0.0):.2f} mi")
+            b3.metric('Avg HR', f"{int(_to_float(row.get('average_heart_rate', 0.0), 0.0))}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Data Manager":
     st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)
@@ -3432,7 +4459,7 @@ elif page == "Data Manager":
                 {'section': k, 'ms': float(v)} for k, v in sections.items()
             ]
             if section_rows:
-                st.dataframe(pd.DataFrame(section_rows).sort_values('ms', ascending=False), use_container_width=True)
+                st.dataframe(pd.DataFrame(section_rows).sort_values('ms', ascending=False), width='stretch')
             else:
                 st.caption('No section timings for this page render.')
 
@@ -3447,7 +4474,7 @@ elif page == "Data Manager":
                 file_name='workout_history_cloud.csv',
             )
 
-    if st.button('Verify Latest Workout in Supabase', use_container_width=True):
+    if st.button('Verify Latest Workout in Supabase', width='stretch'):
         if cloud_error:
             st.error('Verification failed: cloud unavailable')
         else:

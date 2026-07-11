@@ -276,7 +276,7 @@ def render_muscle_heatmap(snapshot: Dict, key_prefix: str = "heatmap") -> None:
         item = ready_map.get(muscle, _default_row(muscle))
         with grid_cols[idx % 2]:
             st.markdown(_card_markup(item, str(st.session_state.get(selected_key, "")).lower() == muscle), unsafe_allow_html=True)
-            if st.button(f"Inspect {muscle.title()}", key=f"{key_prefix}_{muscle}_inspect", use_container_width=True):
+            if st.button(f"Inspect {muscle.title()}", key=f"{key_prefix}_{muscle}_inspect", width='stretch'):
                 st.session_state[selected_key] = muscle
 
     selected = ready_map.get(str(st.session_state.get(selected_key, "")).lower(), {})
