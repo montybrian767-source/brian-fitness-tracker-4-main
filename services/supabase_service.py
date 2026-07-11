@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+import time
 
 import pandas as pd
 import streamlit as st
@@ -138,11 +139,13 @@ def connect_supabase() -> Tuple[Optional[Any], Optional[str]]:
         return None, str(exc)
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _create_cached_supabase_client(supabase_url: str, supabase_key: str):
     from supabase import create_client
-
-    return create_client(supabase_url, supabase_key)
+    started = time.perf_counter()
+    client = create_client(supabase_url, supabase_key)
+    st.session_state['supabase_client_init_ms'] = round((time.perf_counter() - started) * 1000.0, 2)
+    return client
 
 
 def save_workout(workout: Dict[str, Any]) -> Tuple[bool, Optional[str]]:

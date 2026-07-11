@@ -140,13 +140,10 @@ def _latest_row_on_or_before(df: pd.DataFrame, date_col: str, target: date) -> O
     if date_col not in df.columns:
         return None
 
-    series = df[date_col]
-    if pd.api.types.is_datetime64tz_dtype(series):
-        cutoff, _ = to_utc_day_bounds(target)
-    else:
-        cutoff = pd.Timestamp(target)
-
-    filtered = df[df[date_col] <= cutoff]
+    # Force both sides to UTC-aware timestamps before comparison.
+    series = pd.to_datetime(df[date_col], errors='coerce', utc=True)
+    cutoff, _ = to_utc_day_bounds(target)
+    filtered = df[series <= cutoff]
     if filtered.empty:
         return None
     return filtered.sort_values(date_col).iloc[-1]
@@ -335,6 +332,7 @@ def calculate_activity_load_score(
         workouts = _normalize_apple_workouts(apple_workouts)
 
         workouts = workouts.copy()
+        # Normalize workout timestamps to UTC before all day-window comparisons.
         workouts['start_time'] = pd.to_datetime(
             workouts['start_time'],
             errors='coerce',
@@ -348,13 +346,7 @@ def calculate_activity_load_score(
             )
         workouts = workouts.dropna(subset=['start_time'])
 
-        target_ts = pd.Timestamp(target_date)
-        if target_ts.tzinfo is None:
-            target_ts = target_ts.tz_localize('UTC')
-        else:
-            target_ts = target_ts.tz_convert('UTC')
-        day_start = target_ts.normalize()
-        day_end = day_start + pd.Timedelta(days=1)
+        day_start, day_end = to_utc_day_bounds(target_date)
 
         latest_daily = _latest_row_on_or_before(daily, 'activity_date', target)
         if latest_daily is None and workouts.empty:

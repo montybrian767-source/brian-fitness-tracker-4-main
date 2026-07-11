@@ -1,6 +1,6 @@
-APP_VERSION = "8.0.1"
+APP_VERSION = "8.1"
 APP_NAME = "Brian Fit"
-BUILD_LABEL = "X.20.1 Stability Release"
+BUILD_LABEL = "X.21 Performance & Stability Edition"
 
 DISPLAY_NAME = f"{APP_NAME} {APP_VERSION}"
 DISPLAY_KICKER = f"{DISPLAY_NAME} • {BUILD_LABEL}"

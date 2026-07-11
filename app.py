@@ -2,9 +2,7 @@
 from pathlib import Path
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
-from contextlib import contextmanager
 import base64
-import time
 import pandas as pd
 import streamlit as st
 import textwrap
@@ -44,6 +42,14 @@ from services.supabase_service import (
     health_check,
 )
 from utils.datetime_utils import to_utc_series
+from utils.performance_utils import (
+    clear_render_metrics,
+    get_render_metrics,
+    mark_cold_start,
+    record_query_call,
+    save_render_summary,
+    timed_section,
+)
 from services.apple_health_import_service import (
     get_apple_activity_daily,
     get_daily_readiness_history,
@@ -178,34 +184,15 @@ def _init_perf_state():
         st.session_state['perf_last_page'] = {}
 
 
-@contextmanager
 def perf_section(name: str):
-    started = time.perf_counter()
-    try:
-        yield
-    finally:
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        sections = st.session_state.setdefault('perf_sections', {})
-        sections[name] = round(elapsed_ms, 2)
+    return timed_section(name)
 
 
 def summarize_perf(page_name: str):
-    sections = dict(st.session_state.get('perf_sections', {}))
-    if not sections:
-        return
-    slowest_name = max(sections, key=lambda k: sections[k])
-    total_ms = round(sum(float(v) for v in sections.values()), 2)
-    st.session_state['perf_last_page'] = {
-        'page': page_name,
-        'render_ms': total_ms,
-        'slowest_section': slowest_name,
-        'slowest_ms': sections[slowest_name],
-        'sections': sections,
-        'rendered_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
+    save_render_summary(page_name)
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_static_app_config() -> dict:
     return {
         'data_dir': str(DATA),
@@ -214,13 +201,14 @@ def get_static_app_config() -> dict:
     }
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_exercise_intelligence_resource() -> ExerciseIntelligence:
     return ExerciseIntelligence()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_workouts(days: Optional[int] = 90):
+    record_query_call('workouts')
     try:
         result = get_workouts(days=days)
     except TypeError:
@@ -252,18 +240,21 @@ def cached_get_workouts(days: Optional[int] = 90):
     return rows, None
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_recent_apple_activity(days: int = 90):
+    record_query_call('apple_activity_daily_recent')
     return get_recent_apple_activity(days=days)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_recent_apple_workouts(days: int = 90):
+    record_query_call('apple_workouts_recent')
     return get_recent_apple_workouts(days=days)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_apple_activity_daily(days: int = 90):
+    record_query_call('apple_activity_daily')
     df, err = get_apple_activity_daily()
     if err or df.empty:
         return df, err
@@ -276,8 +267,9 @@ def cached_get_apple_activity_daily(days: int = 90):
     return tmp[tmp['activity_date'] >= cutoff], err
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_apple_workouts(days: int = 90):
+    record_query_call('apple_workouts')
     cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=max(1, int(days)) - 1)
     df, _, err = get_apple_workouts_dataframe(
         date_from=cutoff.date().isoformat(),
@@ -295,37 +287,77 @@ def cached_get_apple_workouts(days: int = 90):
     return tmp[tmp['start_time'] >= cutoff], err
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_daily_readiness_history(days: int = 90):
+    record_query_call('daily_readiness_history')
     return get_daily_readiness_history(days=days)
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_get_import_summary():
+    record_query_call('apple_import_summary')
     return get_import_summary()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_exercise_profile(exercise_name: str):
     intel = get_exercise_intelligence_resource()
     return intel.get_profile(exercise_name)
 
 
-def clear_runtime_caches():
+def clear_strength_caches():
     cached_get_workouts.clear()
+    _cached_load_workouts.clear()
+
+
+def clear_cardio_caches():
+    cached_get_cardio_rows.clear()
+
+
+def clear_apple_caches():
     cached_get_recent_apple_activity.clear()
     cached_get_recent_apple_workouts.clear()
     cached_get_apple_activity_daily.clear()
     cached_get_apple_workouts.clear()
-    cached_get_daily_readiness_history.clear()
     cached_get_import_summary.clear()
+
+
+def clear_readiness_cache():
+    cached_get_daily_readiness_history.clear()
+
+
+def clear_ai_coach_cache():
     adaptive_cache = globals().get('cached_build_daily_coaching_plan')
     if adaptive_cache is not None:
         adaptive_cache.clear()
-    # readiness is computed from cached queries; clear local snapshot too.
+
+
+def clear_history_cache():
+    pass
+
+
+def clear_progress_cache():
+    pass
+
+
+def clear_local_shared_payloads():
     for key in list(st.session_state.keys()):
         if str(key).startswith('readiness_') or str(key).startswith('adaptive_coach_'):
             st.session_state.pop(key, None)
+    st.session_state.pop('shared_readiness_payload', None)
+    st.session_state.pop('shared_adaptive_plan_payload', None)
+
+
+# Keep original broad invalidation behavior for save/import flows.
+def clear_runtime_caches():
+    clear_strength_caches()
+    clear_cardio_caches()
+    clear_apple_caches()
+    clear_readiness_cache()
+    clear_ai_coach_cache()
+    clear_history_cache()
+    clear_progress_cache()
+    clear_local_shared_payloads()
 
 
 def invalidate_apple_import_caches_if_needed():
@@ -341,6 +373,10 @@ def invalidate_apple_import_caches_if_needed():
 _init_perf_state()
 _ = get_static_app_config()
 invalidate_apple_import_caches_if_needed()
+is_first_load = mark_cold_start()
+st.session_state['perf_render_state'] = 'cold' if is_first_load else 'warm'
+if is_first_load:
+    st.info('Brian Fit is waking up. The first load may take a little longer.')
 
 def read_csv_safe(path, columns):
     ensure_csv(path, columns)
@@ -390,7 +426,8 @@ def save_coach_goals(primary_goal: str, secondary_goals: list[str]) -> None:
         },
         COACH_GOAL_COLUMNS,
     )
-    clear_runtime_caches()
+    clear_ai_coach_cache()
+    clear_local_shared_payloads()
 
 
 def load_coach_preferences() -> dict:
@@ -435,7 +472,8 @@ def save_coach_preferences(preferences: dict) -> None:
         },
         COACH_PREFERENCE_COLUMNS,
     )
-    clear_runtime_caches()
+    clear_ai_coach_cache()
+    clear_local_shared_payloads()
 
 
 def load_coaching_feedback() -> pd.DataFrame:
@@ -451,11 +489,13 @@ def save_coaching_feedback_row(payload: dict) -> None:
             existing = existing.loc[~dup].copy()
             existing.to_csv(COACHING_FEEDBACK, index=False)
     append_csv(COACHING_FEEDBACK, payload, COACHING_FEEDBACK_COLUMNS)
-    clear_runtime_caches()
+    clear_ai_coach_cache()
+    clear_local_shared_payloads()
 
 
 @st.cache_data(
     ttl=60,
+    show_spinner=False,
     hash_funcs={
         pd.DataFrame: lambda df: df.to_json(orient='split', date_format='iso', default_handler=str),
     },
@@ -551,6 +591,12 @@ def repair_workout_database(df):
 
 def load_workouts():
     ensure_csv(WORKOUTS, ['day','muscle_group','exercise','target_sets','target_reps','base_weight','image_file'])
+    mtime = WORKOUTS.stat().st_mtime if WORKOUTS.exists() else 0.0
+    return _cached_load_workouts(mtime)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_load_workouts(_mtime: float) -> pd.DataFrame:
     df = pd.read_csv(WORKOUTS)
     return repair_workout_database(df)
 
@@ -725,8 +771,14 @@ def _normalize_cardio_rows(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_get_cardio_rows(days: Optional[int] = 90, activity_type: Optional[str] = None):
+    record_query_call('cardio_sessions')
+    return get_cardio_sessions(days=days, activity_type=activity_type)
+
+
 def load_cardio_log(return_meta: bool = False, days: Optional[int] = 90, activity_type: Optional[str] = None):
-    rows, cloud_error, setup_warning = get_cardio_sessions(days=days, activity_type=activity_type)
+    rows, cloud_error, setup_warning = cached_get_cardio_rows(days=days, activity_type=activity_type)
     df = _normalize_cardio_rows(rows)
     source = 'cloud' if cloud_error is None else 'csv_fallback'
     if return_meta:
@@ -947,9 +999,69 @@ def get_recent_exercise_stats(log_df: pd.DataFrame, exercise_name: str) -> tuple
     return last_weight, last_reps, best_weight
 
 
+def _latest_timestamp_text(df: Optional[pd.DataFrame], candidates: List[str]) -> str:
+    if df is None or df.empty:
+        return ''
+    for col in candidates:
+        if col not in df.columns:
+            continue
+        series = pd.to_datetime(df[col], errors='coerce', utc=True)
+        if getattr(series, 'empty', True):
+            continue
+        latest = series.dropna().max()
+        if pd.notna(latest):
+            return str(latest)
+    return ''
+
+
+def _readiness_signature(target: date, log_df: pd.DataFrame, body_df: pd.DataFrame, goals_payload: dict, preferences_payload: dict) -> str:
+    strength_ts = _latest_timestamp_text(log_df, ['created_at', 'date', 'workout_date'])
+    cardio_df = load_cardio_log(days=90)
+    cardio_ts = _latest_timestamp_text(cardio_df, ['created_at', 'start_time', 'activity_date'])
+    apple_daily_df, _ = cached_get_apple_activity_daily(days=90)
+    apple_workouts_df, _ = cached_get_apple_workouts(days=90)
+    apple_daily_ts = _latest_timestamp_text(apple_daily_df, ['activity_date', 'created_at'])
+    apple_workouts_ts = _latest_timestamp_text(apple_workouts_df, ['start_time', 'end_time', 'created_at'])
+    body_ts = _latest_timestamp_text(body_df, ['updated_at', 'date', 'created_at'])
+    goal_version = str(goals_payload.get('updated_at', '')) if isinstance(goals_payload, dict) else ''
+    pref_version = str(preferences_payload.get('updated_at', '')) if isinstance(preferences_payload, dict) else ''
+    return '|'.join([
+        target.isoformat(),
+        strength_ts,
+        cardio_ts,
+        apple_daily_ts,
+        apple_workouts_ts,
+        body_ts,
+        goal_version,
+        pref_version,
+    ])
+
+
+def _adaptive_signature(target: date, readiness_sig: str, log_df: pd.DataFrame, goals_payload: dict, preferences_payload: dict, feedback_df: pd.DataFrame) -> str:
+    strength_ts = _latest_timestamp_text(log_df, ['created_at', 'date', 'workout_date'])
+    cardio_df = load_cardio_log(days=90)
+    cardio_ts = _latest_timestamp_text(cardio_df, ['created_at', 'start_time', 'activity_date'])
+    feedback_ts = _latest_timestamp_text(feedback_df, ['created_at'])
+    goal_version = str(goals_payload.get('updated_at', '')) if isinstance(goals_payload, dict) else ''
+    pref_version = str(preferences_payload.get('updated_at', '')) if isinstance(preferences_payload, dict) else ''
+    return '|'.join([
+        target.isoformat(),
+        readiness_sig,
+        strength_ts,
+        cardio_ts,
+        goal_version,
+        pref_version,
+        feedback_ts,
+    ])
+
+
 def compute_shared_readiness(log_df: pd.DataFrame, target_dt: Optional[date] = None) -> dict:
     target = target_dt or date.today()
-    cache_key = f'readiness_{target.isoformat()}'
+    body_df = read_csv_safe(BODY, BODY_COLUMNS)
+    goals_payload = load_coach_goals()
+    preferences_payload = load_coach_preferences()
+    signature = _readiness_signature(target, log_df, body_df, goals_payload, preferences_payload)
+    cache_key = f'readiness_{signature}'
     cached = st.session_state.get(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -972,6 +1084,7 @@ def compute_shared_readiness(log_df: pd.DataFrame, target_dt: Optional[date] = N
 
     payload = {
         'target_date': str(target),
+        'signature': signature,
         'result': result,
         'history_df': history_df,
         'apple_error': apple_daily_err,
@@ -1013,20 +1126,23 @@ def apply_readiness_to_next_workout(next_workout: dict, readiness_result: dict) 
 
 def compute_shared_adaptive_plan(log_df: pd.DataFrame, workouts_df: pd.DataFrame, target_dt: Optional[date] = None) -> dict:
     target = target_dt or date.today()
-    cache_key = f'adaptive_coach_{target.isoformat()}'
+    readiness_payload = compute_shared_readiness(log_df, target)
+    readiness_sig = str(readiness_payload.get('signature', ''))
+    goals_payload = load_coach_goals()
+    preferences_payload = load_coach_preferences()
+    feedback_df = load_coaching_feedback()
+    signature = _adaptive_signature(target, readiness_sig, log_df, goals_payload, preferences_payload, feedback_df)
+    cache_key = f'adaptive_coach_{signature}'
     cached = st.session_state.get(cache_key)
     if isinstance(cached, dict):
         return cached
 
-    readiness_payload = compute_shared_readiness(log_df, target)
     readiness_result = readiness_payload.get('result', {}) if isinstance(readiness_payload, dict) else {}
     with perf_section('adaptive coach inputs'):
         cardio_df = load_cardio_log(days=90)
         apple_daily_df, _ = cached_get_apple_activity_daily(days=90)
         apple_workouts_df, _ = cached_get_apple_workouts(days=90)
         body_df = read_csv_safe(BODY, BODY_COLUMNS)
-        goals_payload = load_coach_goals()
-        preferences_payload = load_coach_preferences()
 
     with perf_section('adaptive coach planning'):
         plan = cached_build_daily_coaching_plan(
@@ -1044,6 +1160,7 @@ def compute_shared_adaptive_plan(log_df: pd.DataFrame, workouts_df: pd.DataFrame
 
     payload = {
         'target_date': target.isoformat(),
+        'signature': signature,
         'plan': plan,
         'goals': goals_payload,
         'preferences': preferences_payload,
@@ -2510,7 +2627,7 @@ st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="
 
 page = get_mobile_primary_page()
 set_active_route(page)
-st.session_state['perf_sections'] = {}
+clear_render_metrics()
 
 needs_workouts = page in {
     'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
@@ -2521,7 +2638,7 @@ needs_log = page in {
     'Quick Log', 'Workout Builder', 'Weekly Coaching Report', 'Progress Analytics', 'History', 'Recovery & Readiness',
 }
 needs_readiness = page in {'Dashboard', 'AI Personal Trainer', 'Recovery & Readiness'}
-needs_coaching = page in {'Dashboard', 'AI Personal Trainer', 'History', 'Progress Analytics'}
+needs_coaching = page in {'Dashboard', 'AI Personal Trainer'}
 
 workouts = pd.DataFrame()
 log = pd.DataFrame()
@@ -4927,17 +5044,25 @@ elif page == "Data Manager":
     r11.metric('Optional migration status', 'Ready' if not optional_missing else f"Missing: {len(optional_missing)}")
 
     st.markdown('### Performance Diagnostics')
-    sections = dict(st.session_state.get('perf_sections', {}))
+    perf = get_render_metrics()
+    sections = dict(perf.get('sections', {}))
+    query_counts = dict(perf.get('query_counts', {}))
     if not sections:
         st.caption('No performance snapshot collected yet.')
     else:
-        slowest_name = max(sections, key=lambda k: sections[k])
-        total_ms = sum(float(v) for v in sections.values())
+        slowest_name = str(perf.get('slowest_section', ''))
+        total_ms = float(perf.get('render_ms', 0.0) or 0.0)
         p1, p2, p3, p4 = st.columns(4)
         p1.metric('Page', str(page))
         p2.metric('Render Time', f"{float(total_ms):.1f} ms")
         p3.metric('Slowest Section', str(slowest_name))
         p4.metric('Slowest Time', f"{float(sections[slowest_name]):.1f} ms")
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric('Render mode', str(st.session_state.get('perf_render_state', 'warm')).title())
+        q2.metric('Supabase client init', f"{float(st.session_state.get('supabase_client_init_ms', 0.0) or 0.0):.1f} ms")
+        q3.metric('Total query calls', str(sum(int(v) for v in query_counts.values())))
+        duplicate_calls = {k: int(v) for k, v in query_counts.items() if int(v) > 1}
+        q4.metric('Duplicate query keys', str(len(duplicate_calls)))
         with st.expander('Section timings', expanded=False):
             section_rows = [
                 {'section': k, 'ms': float(v)} for k, v in sections.items()
@@ -4946,6 +5071,14 @@ elif page == "Data Manager":
                 st.dataframe(pd.DataFrame(section_rows).sort_values('ms', ascending=False), width='stretch')
             else:
                 st.caption('No section timings for this page render.')
+        with st.expander('Query call counts', expanded=False):
+            if query_counts:
+                q_rows = [{'query': k, 'calls': int(v)} for k, v in query_counts.items()]
+                st.dataframe(pd.DataFrame(q_rows).sort_values('calls', ascending=False), width='stretch')
+                if duplicate_calls:
+                    st.warning('Duplicate query calls detected in this rerun. Review keys with calls > 1.')
+            else:
+                st.caption('No query call metrics captured for this render.')
 
     if cloud_health.get('connected'):
         if cloud_error:
