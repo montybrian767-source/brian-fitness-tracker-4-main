@@ -123,11 +123,16 @@ def connect_supabase() -> Tuple[Optional[Any], Optional[str]]:
         return None, 'missing_credentials'
 
     try:
-        from supabase import create_client
-
-        return create_client(supabase_url, supabase_key), None
+        return _create_cached_supabase_client(supabase_url, supabase_key), None
     except Exception as exc:
         return None, str(exc)
+
+
+@st.cache_resource
+def _create_cached_supabase_client(supabase_url: str, supabase_key: str):
+    from supabase import create_client
+
+    return create_client(supabase_url, supabase_key)
 
 
 def save_workout(workout: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
@@ -258,33 +263,31 @@ def save_workout_session(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def get_workouts() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def get_workouts(days: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     client, err = connect_supabase()
     if err:
         return [], err
 
+    cutoff_iso: Optional[str] = None
+    if isinstance(days, int) and days > 0:
+        cutoff_iso = (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=int(days))).date().isoformat()
+
     try:
         try:
-            response = (
-                client.table('workouts')
-                .select(
-                    'id,created_at,workout_session_id,workout_date,day,exercise,set_number,weight_lbs,reps,rpe,body_feedback_score,body_feedback_notes,volume'
-                )
-                .order('workout_date', desc=False)
-                .order('set_number', desc=False)
-                .execute()
+            query = client.table('workouts').select(
+                'id,created_at,workout_session_id,workout_date,day,exercise,set_number,weight_lbs,reps,rpe,body_feedback_score,body_feedback_notes,volume'
             )
+            if cutoff_iso:
+                query = query.gte('workout_date', cutoff_iso)
+            response = query.order('workout_date', desc=False).order('set_number', desc=False).execute()
             return list(response.data or []), None
         except Exception:
-            response = (
-                client.table('workouts')
-                .select(
-                    'id,created_at,workout_date,day,exercise,set_number,weight_lbs,reps,rpe,body_feedback_score,body_feedback_notes,volume'
-                )
-                .order('workout_date', desc=False)
-                .order('set_number', desc=False)
-                .execute()
+            query = client.table('workouts').select(
+                'id,created_at,workout_date,day,exercise,set_number,weight_lbs,reps,rpe,body_feedback_score,body_feedback_notes,volume'
             )
+            if cutoff_iso:
+                query = query.gte('workout_date', cutoff_iso)
+            response = query.order('workout_date', desc=False).order('set_number', desc=False).execute()
             return list(response.data or []), None
     except Exception as exc:
         return [], str(exc)
