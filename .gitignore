@@ -22,3 +22,9 @@ data/nutrition_log.csv
 data/recovery_log.csv
 data/supplement_log.csv
 data/body_stats.csv
+data/cardio_sessions.csv
+data/coach_goals.csv
+data/coach_preferences.csv
+data/coaching_feedback.csv
+data/workout_log.csv
+data/body_stats.csv
