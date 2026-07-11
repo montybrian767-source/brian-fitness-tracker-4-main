@@ -1,2 +1,6 @@
-APP_NAME = "Brian Fit 7.5"
-APP_RELEASE = "X.19 Unified Strength + Cardio Logger"
+APP_VERSION = "8.0.1"
+APP_NAME = "Brian Fit"
+BUILD_LABEL = "X.20.1 Stability Release"
+
+DISPLAY_NAME = f"{APP_NAME} {APP_VERSION}"
+DISPLAY_KICKER = f"{DISPLAY_NAME} • {BUILD_LABEL}"

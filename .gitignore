@@ -1,8 +1,24 @@
 __pycache__/
 *.pyc
 .env
+.env.*
 .streamlit/secrets.toml
+.streamlit/*.toml
 *.zip
 export.xml
 apple_health_export/
 temp_health_import/
+
+# Runtime/generated local data
+backups/
+exports/
+tmp/
+logs/
+*.log
+
+# Mutable personal tracking logs
+data/workout_log.csv
+data/nutrition_log.csv
+data/recovery_log.csv
+data/supplement_log.csv
+data/body_stats.csv

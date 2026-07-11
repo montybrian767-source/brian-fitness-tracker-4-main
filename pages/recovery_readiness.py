@@ -104,7 +104,7 @@ def render_recovery_readiness_page(readiness_result: Dict[str, Any], readiness_h
     st.markdown(
         f"""
         <div class='rr-hero'>
-            <div class='rr-kicker'>Brian Fit 7.5 • X.19 Unified Strength + Cardio Logger</div>
+            <div class='rr-kicker'>Brian Fit 8.0 • X.20 Adaptive AI Coach</div>
             <div class='rr-title'>Recovery & Readiness</div>
             <div class='rr-sub'>Daily training estimate combining Brian Fit and imported Apple Health activity.</div>
             <div class='rr-score-wrap'>

@@ -1,0 +1,2 @@
+created_at,workout_session_id,activity_date,start_time,end_time,activity_type,category,duration_minutes,distance_value,distance_unit,calories_burned,average_heart_rate,maximum_heart_rate,average_pace,average_speed,incline_percent,resistance_level,laps,pool_length,pool_length_unit,steps,rpe,notes,source,apple_workout_key,verified
+2026-07-10T23:22:14.531903,ws_20260710_232007465989,2026-07-10,,,Walking,cardio,30.0,0.0,,0.0,0.0,0.0,,0.0,0.0,0.0,0.0,0.0,,0.0,6.0,VALIDATION_TEST_CARDIO_UI_20260710_2323,Brian Fit,,False

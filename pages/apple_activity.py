@@ -9,6 +9,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from config.version import DISPLAY_KICKER
+
 from services.apple_health_import_service import (
     get_apple_activity_daily,
     get_apple_workout_day_aggregate,
@@ -356,7 +358,7 @@ def render_apple_activity_page():
     st.markdown(
         '''
         <div class="apple-hero">
-          <div class="apple-kicker">Brian Fit 7.4 • X.18 Apple Intelligence Dashboard</div>
+          <div class="apple-kicker">{DISPLAY_KICKER} Apple Intelligence Dashboard</div>
           <div class="apple-title">Apple Intelligence</div>
           <div class="apple-sub">Full Apple workout intelligence with fast pagination, filter control, and Brian Fit training context.</div>
         </div>
@@ -739,9 +741,10 @@ def render_apple_activity_page():
 
     st.markdown('### Pickleball Intelligence')
     pickleball_df = all_filtered_df[all_filtered_df['workout_type'] == 'Pickleball'].copy() if not all_filtered_df.empty else pd.DataFrame()
-    this_month = pd.Timestamp.now(tz='UTC').to_period('M')
+    this_month = pd.Timestamp.now(tz='UTC').tz_localize(None).to_period('M')
     if not pickleball_df.empty:
-        pickleball_df['month_period'] = pickleball_df['start_time'].dt.to_period('M')
+        pickleball_start = pd.to_datetime(pickleball_df['start_time'], errors='coerce', utc=True).dt.tz_localize(None)
+        pickleball_df['month_period'] = pickleball_start.dt.to_period('M')
         p_month = pickleball_df[pickleball_df['month_period'] == this_month]
         pk1, pk2, pk3, pk4 = st.columns(4)
         pk1.metric('Sessions this month', _safe_int(len(p_month)))
@@ -753,7 +756,7 @@ def render_apple_activity_page():
         pk5.metric('Calories this month', _fmt_num(p_month['total_energy_kcal'].sum() if not p_month.empty else 0, 0, ' kcal'))
         hr_vals = pickleball_df[pickleball_df['average_heart_rate'] > 0]['average_heart_rate']
         pk6.metric('Average heart rate', _fmt_num(hr_vals.mean() if not hr_vals.empty else 0, 0, ' bpm'))
-        p_week = pickleball_df.assign(week=pickleball_df['start_time'].dt.to_period('W').astype(str)).groupby('week', as_index=False).size().rename(columns={'size': 'sessions'})
+        p_week = pickleball_df.assign(week=pickleball_start.dt.to_period('W').astype(str)).groupby('week', as_index=False).size().rename(columns={'size': 'sessions'})
         pk7.metric('Weeks with sessions', _safe_int(len(p_week)))
 
         st.caption('Recent pickleball timeline')

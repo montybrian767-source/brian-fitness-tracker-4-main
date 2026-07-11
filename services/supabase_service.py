@@ -20,6 +20,16 @@ WORKOUT_COLUMNS = [
     'volume',
 ]
 
+FEATURE_TABLES = {
+    'Workouts': {'table': 'workouts', 'optional': False, 'sql': ''},
+    'Cardio Sessions': {'table': 'cardio_sessions', 'optional': True, 'sql': 'supabase/cardio_sessions_schema.sql'},
+    'Apple Activity Daily': {'table': 'apple_activity_daily', 'optional': True, 'sql': 'supabase/apple_activity_daily_schema.sql'},
+    'Apple Workouts': {'table': 'apple_workouts', 'optional': True, 'sql': 'supabase/apple_workouts_schema.sql'},
+    'Daily Readiness': {'table': 'daily_readiness', 'optional': True, 'sql': 'supabase/daily_readiness_schema.sql'},
+    'Coaching Feedback': {'table': 'coaching_feedback', 'optional': True, 'sql': 'supabase/coaching_feedback_schema.sql'},
+    'Apple Import Jobs': {'table': 'apple_import_jobs', 'optional': True, 'sql': 'supabase/apple_import_jobs_schema.sql'},
+}
+
 
 def _to_int(value: Any, default: int = 0) -> int:
     try:
@@ -291,6 +301,37 @@ def get_workouts(days: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Opti
             return list(response.data or []), None
     except Exception as exc:
         return [], str(exc)
+
+
+def get_database_feature_status() -> Tuple[Dict[str, Dict[str, str]], Optional[str]]:
+    client, err = connect_supabase()
+    if err:
+        return {}, str(err)
+
+    status: Dict[str, Dict[str, str]] = {}
+    for name, meta in FEATURE_TABLES.items():
+        table_name = str(meta.get('table', '')).strip()
+        sql_file = str(meta.get('sql', '')).strip()
+        optional = bool(meta.get('optional', False))
+        try:
+            response = client.table(table_name).select('id', count='exact', head=True).execute()
+            count = int(response.count or 0)
+            status[name] = {
+                'state': 'Ready',
+                'optional': 'Yes' if optional else 'No',
+                'table': table_name,
+                'sql': sql_file,
+                'details': f'Rows: {count}',
+            }
+        except Exception as exc:
+            status[name] = {
+                'state': 'Missing',
+                'optional': 'Yes' if optional else 'No',
+                'table': table_name,
+                'sql': sql_file,
+                'details': str(exc),
+            }
+    return status, None
 
 
 def delete_workout(row_id: int) -> Tuple[bool, Optional[str]]:

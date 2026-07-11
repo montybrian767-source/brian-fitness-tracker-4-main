@@ -43,10 +43,10 @@ def _to_numeric(series: pd.Series) -> pd.Series:
 
 def _to_date(target_date: Any) -> date:
     if isinstance(target_date, datetime):
-        return target_date.date()
+        return pd.Timestamp(target_date, tz='UTC').date() if target_date.tzinfo is None else pd.Timestamp(target_date).tz_convert('UTC').date()
     if isinstance(target_date, date):
         return target_date
-    parsed = pd.to_datetime(target_date, errors='coerce')
+    parsed = pd.to_datetime(target_date, errors='coerce', utc=True)
     if pd.isna(parsed):
         return date.today()
     return parsed.date()
@@ -122,7 +122,7 @@ def _normalize_strength_workouts(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         if col not in base.columns:
             base[col] = pd.NA
 
-    base['date'] = pd.to_datetime(base['date'], errors='coerce')
+    base['date'] = pd.to_datetime(base['date'], errors='coerce', utc=True)
     base = base.dropna(subset=['date']).sort_values('date')
     for col in ['volume', 'rpe', 'set_number', 'reps', 'weight_lbs']:
         base[col] = _to_numeric(base[col]).fillna(0)
@@ -177,13 +177,14 @@ def calculate_personal_baselines(
     strength = _normalize_strength_workouts(strength_workouts)
 
     apple_window = apple[apple['activity_date'] <= target_start].copy()
-    strength_window = strength[strength['date'] <= pd.Timestamp(target)].copy()
+    target_start_ts, _ = to_utc_day_bounds(target)
+    strength_window = strength[strength['date'] <= target_start_ts].copy()
 
     recent7 = apple_window[apple_window['activity_date'] >= (target_start - pd.Timedelta(days=6))]
     base28 = apple_window[apple_window['activity_date'] >= (target_start - pd.Timedelta(days=27))]
 
-    strength_7 = strength_window[strength_window['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=6))]
-    strength_28 = strength_window[strength_window['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=27))]
+    strength_7 = strength_window[strength_window['date'] >= (target_start_ts - pd.Timedelta(days=6))]
+    strength_28 = strength_window[strength_window['date'] >= (target_start_ts - pd.Timedelta(days=27))]
 
     weekly_volume_7 = float(strength_7.groupby(strength_7['date'].dt.date)['volume'].sum().sum()) if not strength_7.empty else None
     weekly_volume_28 = float(strength_28.groupby(strength_28['date'].dt.date)['volume'].sum().sum()) if not strength_28.empty else None
@@ -330,13 +331,30 @@ def calculate_activity_load_score(
 ) -> Dict[str, Any]:
     try:
         target = _to_date(target_date)
-        day_start, day_end = to_utc_day_bounds(target_date)
         daily = _normalize_apple_daily(apple_daily_data)
         workouts = _normalize_apple_workouts(apple_workouts)
 
-        if 'start_time' in workouts.columns:
-            workouts['start_time'] = to_utc_series(workouts['start_time'])
-            workouts = workouts.dropna(subset=['start_time'])
+        workouts = workouts.copy()
+        workouts['start_time'] = pd.to_datetime(
+            workouts['start_time'],
+            errors='coerce',
+            utc=True,
+        )
+        if 'end_time' in workouts.columns:
+            workouts['end_time'] = pd.to_datetime(
+                workouts['end_time'],
+                errors='coerce',
+                utc=True,
+            )
+        workouts = workouts.dropna(subset=['start_time'])
+
+        target_ts = pd.Timestamp(target_date)
+        if target_ts.tzinfo is None:
+            target_ts = target_ts.tz_localize('UTC')
+        else:
+            target_ts = target_ts.tz_convert('UTC')
+        day_start = target_ts.normalize()
+        day_end = day_start + pd.Timedelta(days=1)
 
         latest_daily = _latest_row_on_or_before(daily, 'activity_date', target)
         if latest_daily is None and workouts.empty:
@@ -373,7 +391,10 @@ def calculate_activity_load_score(
 
             details.append(f'Steps {int(steps):,}, active calories {int(energy):,}, exercise minutes {int(minutes)}.')
 
-        day_workouts = workouts[(workouts['start_time'] >= day_start) & (workouts['start_time'] < day_end)]
+        day_workouts = workouts[
+            (workouts['start_time'] >= day_start)
+            & (workouts['start_time'] < day_end)
+        ].copy()
 
         if not day_workouts.empty:
             total_duration = float(day_workouts['duration_minutes'].fillna(0).sum())
@@ -405,13 +426,12 @@ def _strength_daily_aggregate(strength: pd.DataFrame) -> pd.DataFrame:
     if strength.empty:
         return pd.DataFrame(columns=['date', 'volume', 'sets', 'avg_rpe', 'exercise_count'])
 
-    grouped = strength.groupby(strength['date'].dt.date, as_index=False).agg(
+    grouped = strength.groupby(strength['date'].dt.normalize(), as_index=False).agg(
         volume=('volume', 'sum'),
         sets=('set_number', 'count'),
         avg_rpe=('rpe', 'mean'),
         exercise_count=('exercise', 'nunique'),
     )
-    grouped['date'] = pd.to_datetime(grouped['date'], errors='coerce')
     return grouped.sort_values('date')
 
 
@@ -438,13 +458,14 @@ def calculate_strength_load_score(
     if strength.empty:
         return {'available': False, 'score': None, 'reason': 'No Brian Fit workout history available.'}
 
-    strength = strength[strength['date'] <= pd.Timestamp(target)]
+    target_start_ts, _ = to_utc_day_bounds(target)
+    strength = strength[strength['date'] <= target_start_ts]
     daily = _strength_daily_aggregate(strength)
     if daily.empty:
         return {'available': False, 'score': None, 'reason': 'No Brian Fit workout history before target date.'}
 
-    recent3 = daily[daily['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=2))]
-    recent7 = daily[daily['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=6))]
+    recent3 = daily[daily['date'] >= (target_start_ts - pd.Timedelta(days=2))]
+    recent7 = daily[daily['date'] >= (target_start_ts - pd.Timedelta(days=6))]
 
     recent_volume_3 = float(recent3['volume'].sum()) if not recent3.empty else 0.0
     recent_volume_7 = float(recent7['volume'].sum()) if not recent7.empty else 0.0
@@ -507,7 +528,8 @@ def calculate_recovery_balance(
     if strength.empty:
         return {'available': True, 'score': 58.0, 'reason': 'No recent strength sessions; neutral recovery balance with low confidence.', 'details': {'days_since_last_workout': None}}
 
-    strength = strength[strength['date'] <= pd.Timestamp(target)]
+    target_start_ts, _ = to_utc_day_bounds(target)
+    strength = strength[strength['date'] <= target_start_ts]
     if strength.empty:
         return {'available': True, 'score': 58.0, 'reason': 'No recent strength sessions before target date.', 'details': {'days_since_last_workout': None}}
 
@@ -584,7 +606,8 @@ def build_muscle_recovery_cards(
         secondary_load += float(latest_apple.get('exercise_minutes') or 0.0) / 180.0
 
     cards: List[Dict[str, Any]] = []
-    recent_7 = strength[strength['date'] >= (pd.Timestamp(target) - pd.Timedelta(days=6))]
+    target_start_ts, _ = to_utc_day_bounds(target)
+    recent_7 = strength[strength['date'] >= (target_start_ts - pd.Timedelta(days=6))]
 
     for muscle in MUSCLE_GROUPS:
         keywords = MUSCLE_KEYWORDS[muscle]

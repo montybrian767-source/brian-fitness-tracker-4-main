@@ -9,6 +9,8 @@ import pandas as pd
 import streamlit as st
 import textwrap
 
+from config.version import APP_NAME, APP_VERSION, BUILD_LABEL, DISPLAY_KICKER, DISPLAY_NAME
+
 from components.ai_card import ai_card
 from components.executive_header import executive_header
 from components.glass_panel import glass_panel
@@ -21,6 +23,7 @@ from components.exercise_photo import exercise_photo
 from components.body_composition_summary import body_composition_summary
 from engines.exercise_intelligence import ExerciseIntelligence
 from engines.body_intelligence import BodyIntelligence
+from engines.adaptive_ai_coach_engine import build_daily_coaching_plan
 from engines.ai_coach_engine import build_daily_brief
 from engines.progressive_overload_engine import analyze_progressive_overload
 from engines.workout_recommendation_engine import generate_next_workout
@@ -36,9 +39,11 @@ from engines.recovery_readiness_engine import (
 from pages.apple_activity import render_apple_activity_page
 from pages.recovery_readiness import render_recovery_readiness_page
 from services.supabase_service import (
+    get_database_feature_status,
     get_workouts,
     health_check,
 )
+from utils.datetime_utils import to_utc_series
 from services.apple_health_import_service import (
     get_apple_activity_daily,
     get_daily_readiness_history,
@@ -82,8 +87,21 @@ SUPPLEMENTS = DATA / "supplement_log.csv"
 SUPPLEMENT_PLAN = DATA / "supplement_plan.csv"
 RECOVERY = DATA / "recovery_log.csv"
 CARDIO_LOG = DATA / "cardio_sessions.csv"
+COACH_GOALS = DATA / "coach_goals.csv"
+COACH_PREFERENCES = DATA / "coach_preferences.csv"
+COACHING_FEEDBACK = DATA / "coaching_feedback.csv"
 
-st.set_page_config(page_title="Brian Fitness Tracker X", page_icon="🏋️", layout="wide", initial_sidebar_state="expanded")
+COACH_GOAL_COLUMNS = ['updated_at', 'primary_goal', 'secondary_goals']
+COACH_PREFERENCE_COLUMNS = [
+    'updated_at', 'preferred_workout_duration', 'training_days_per_week', 'preferred_cardio_types',
+    'preferred_strength_split', 'equipment_access', 'aggressiveness', 'avoided_exercises', 'preferred_rest_days'
+]
+COACHING_FEEDBACK_COLUMNS = [
+    'created_at', 'workout_session_id', 'recommendation_date', 'recommended_category', 'recommended_focus',
+    'readiness_score', 'feedback_rating', 'notes'
+]
+
+st.set_page_config(page_title=DISPLAY_NAME, page_icon="🏋️", layout="wide", initial_sidebar_state="expanded")
 
 def ensure_log():
     if not LOG.exists():
@@ -133,6 +151,9 @@ def ensure_health_logs():
         'calories_burned','average_heart_rate','maximum_heart_rate','average_pace','average_speed','incline_percent',
         'resistance_level','laps','pool_length','pool_length_unit','steps','rpe','notes','source','apple_workout_key','verified'
     ])
+    ensure_csv(COACH_GOALS, COACH_GOAL_COLUMNS)
+    ensure_csv(COACH_PREFERENCES, COACH_PREFERENCE_COLUMNS)
+    ensure_csv(COACHING_FEEDBACK, COACHING_FEEDBACK_COLUMNS)
 ensure_health_logs()
 
 
@@ -189,7 +210,7 @@ def get_static_app_config() -> dict:
     return {
         'data_dir': str(DATA),
         'assets_dir': str(ASSETS),
-        'app_name': 'Brian Fitness Tracker X',
+        'app_name': DISPLAY_NAME,
     }
 
 
@@ -221,7 +242,7 @@ def cached_get_workouts(days: Optional[int] = 90):
         cutoff = (pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=int(days))).date()
         filtered_rows = []
         for row in rows:
-            workout_date = pd.to_datetime((row or {}).get('workout_date', (row or {}).get('date')), errors='coerce')
+            workout_date = to_utc_series((row or {}).get('workout_date', (row or {}).get('date')))
             if pd.isna(workout_date):
                 continue
             if workout_date.date() >= cutoff:
@@ -249,7 +270,7 @@ def cached_get_apple_activity_daily(days: int = 90):
     if 'activity_date' not in df.columns:
         return df, err
     tmp = df.copy()
-    tmp['activity_date'] = pd.to_datetime(tmp['activity_date'], errors='coerce', utc=True)
+    tmp['activity_date'] = to_utc_series(tmp['activity_date'])
     tmp = tmp.dropna(subset=['activity_date'])
     cutoff = pd.Timestamp.now(tz='UTC').normalize() - pd.Timedelta(days=max(1, int(days)) - 1)
     return tmp[tmp['activity_date'] >= cutoff], err
@@ -269,7 +290,7 @@ def cached_get_apple_workouts(days: int = 90):
     if 'start_time' not in df.columns:
         return df, err
     tmp = df.copy()
-    tmp['start_time'] = pd.to_datetime(tmp['start_time'], errors='coerce', utc=True)
+    tmp['start_time'] = to_utc_series(tmp['start_time'])
     tmp = tmp.dropna(subset=['start_time'])
     return tmp[tmp['start_time'] >= cutoff], err
 
@@ -298,9 +319,12 @@ def clear_runtime_caches():
     cached_get_apple_workouts.clear()
     cached_get_daily_readiness_history.clear()
     cached_get_import_summary.clear()
+    adaptive_cache = globals().get('cached_build_daily_coaching_plan')
+    if adaptive_cache is not None:
+        adaptive_cache.clear()
     # readiness is computed from cached queries; clear local snapshot too.
     for key in list(st.session_state.keys()):
-        if str(key).startswith('readiness_'):
+        if str(key).startswith('readiness_') or str(key).startswith('adaptive_coach_'):
             st.session_state.pop(key, None)
 
 
@@ -329,6 +353,139 @@ def append_csv(path, row, columns):
     df = read_csv_safe(path, columns)
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_csv(path, index=False)
+
+
+def _split_pipe_values(value: Any) -> list[str]:
+    text = _to_text(value, '').strip()
+    if not text:
+        return []
+    return [item.strip() for item in text.split('|') if item.strip()]
+
+
+def _join_pipe_values(values: list[str]) -> str:
+    return '|'.join([str(item).strip() for item in (values or []) if str(item).strip()])
+
+
+def load_coach_goals() -> dict:
+    df = read_csv_safe(COACH_GOALS, COACH_GOAL_COLUMNS)
+    if df.empty:
+        return {
+            'primary_goal': 'Improve Fitness',
+            'secondary_goals': [],
+        }
+    row = df.iloc[-1]
+    return {
+        'primary_goal': _to_text(row.get('primary_goal', 'Improve Fitness'), 'Improve Fitness'),
+        'secondary_goals': _split_pipe_values(row.get('secondary_goals', '')),
+    }
+
+
+def save_coach_goals(primary_goal: str, secondary_goals: list[str]) -> None:
+    append_csv(
+        COACH_GOALS,
+        {
+            'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'primary_goal': _to_text(primary_goal, 'Improve Fitness'),
+            'secondary_goals': _join_pipe_values(secondary_goals),
+        },
+        COACH_GOAL_COLUMNS,
+    )
+    clear_runtime_caches()
+
+
+def load_coach_preferences() -> dict:
+    df = read_csv_safe(COACH_PREFERENCES, COACH_PREFERENCE_COLUMNS)
+    if df.empty:
+        return {
+            'preferred_workout_duration': 55,
+            'training_days_per_week': 5,
+            'preferred_cardio_types': ['Walking', 'Outdoor Cycling', 'Pickleball'],
+            'preferred_strength_split': 'Balanced Split',
+            'equipment_access': 'Full Gym',
+            'aggressiveness': 'Balanced',
+            'avoided_exercises': [],
+            'preferred_rest_days': ['Sunday'],
+        }
+    row = df.iloc[-1]
+    return {
+        'preferred_workout_duration': _to_int(row.get('preferred_workout_duration', 55), 55),
+        'training_days_per_week': _to_int(row.get('training_days_per_week', 5), 5),
+        'preferred_cardio_types': _split_pipe_values(row.get('preferred_cardio_types', 'Walking|Outdoor Cycling|Pickleball')) or ['Walking', 'Outdoor Cycling', 'Pickleball'],
+        'preferred_strength_split': _to_text(row.get('preferred_strength_split', 'Balanced Split'), 'Balanced Split'),
+        'equipment_access': _to_text(row.get('equipment_access', 'Full Gym'), 'Full Gym'),
+        'aggressiveness': _to_text(row.get('aggressiveness', 'Balanced'), 'Balanced'),
+        'avoided_exercises': _split_pipe_values(row.get('avoided_exercises', '')),
+        'preferred_rest_days': _split_pipe_values(row.get('preferred_rest_days', 'Sunday')) or ['Sunday'],
+    }
+
+
+def save_coach_preferences(preferences: dict) -> None:
+    append_csv(
+        COACH_PREFERENCES,
+        {
+            'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'preferred_workout_duration': _to_int(preferences.get('preferred_workout_duration', 55), 55),
+            'training_days_per_week': _to_int(preferences.get('training_days_per_week', 5), 5),
+            'preferred_cardio_types': _join_pipe_values(preferences.get('preferred_cardio_types', [])),
+            'preferred_strength_split': _to_text(preferences.get('preferred_strength_split', 'Balanced Split'), 'Balanced Split'),
+            'equipment_access': _to_text(preferences.get('equipment_access', 'Full Gym'), 'Full Gym'),
+            'aggressiveness': _to_text(preferences.get('aggressiveness', 'Balanced'), 'Balanced'),
+            'avoided_exercises': _join_pipe_values(preferences.get('avoided_exercises', [])),
+            'preferred_rest_days': _join_pipe_values(preferences.get('preferred_rest_days', [])),
+        },
+        COACH_PREFERENCE_COLUMNS,
+    )
+    clear_runtime_caches()
+
+
+def load_coaching_feedback() -> pd.DataFrame:
+    return read_csv_safe(COACHING_FEEDBACK, COACHING_FEEDBACK_COLUMNS)
+
+
+def save_coaching_feedback_row(payload: dict) -> None:
+    existing = load_coaching_feedback()
+    session_id = _to_text(payload.get('workout_session_id', '')).strip()
+    if not existing.empty and session_id:
+        dup = existing['workout_session_id'].astype(str).str.strip() == session_id
+        if dup.any():
+            existing = existing.loc[~dup].copy()
+            existing.to_csv(COACHING_FEEDBACK, index=False)
+    append_csv(COACHING_FEEDBACK, payload, COACHING_FEEDBACK_COLUMNS)
+    clear_runtime_caches()
+
+
+@st.cache_data(
+    ttl=60,
+    hash_funcs={
+        pd.DataFrame: lambda df: df.to_json(orient='split', date_format='iso', default_handler=str),
+    },
+)
+def cached_build_daily_coaching_plan(
+    target_date_iso: str,
+    readiness_result: dict,
+    strength_history_df: pd.DataFrame,
+    cardio_history_df: pd.DataFrame,
+    apple_daily_df: pd.DataFrame,
+    apple_workouts_df: pd.DataFrame,
+    body_df: pd.DataFrame,
+    workouts_df: pd.DataFrame,
+    goals_payload: dict,
+    preferences_payload: dict,
+):
+    return build_daily_coaching_plan(
+        target_date=target_date_iso,
+        readiness_result=readiness_result,
+        strength_history=strength_history_df,
+        cardio_history=cardio_history_df,
+        apple_daily=apple_daily_df,
+        apple_workouts=apple_workouts_df,
+        body_stats=body_df,
+        current_plan={
+            'workouts_df': workouts_df,
+            'goals': goals_payload,
+            'preferences': preferences_payload,
+        },
+    )
 
 def repair_workout_database(df):
     """Keep the weekly plan clean even if an older workouts.csv is uploaded."""
@@ -854,11 +1011,54 @@ def apply_readiness_to_next_workout(next_workout: dict, readiness_result: dict) 
     return plan
 
 
+def compute_shared_adaptive_plan(log_df: pd.DataFrame, workouts_df: pd.DataFrame, target_dt: Optional[date] = None) -> dict:
+    target = target_dt or date.today()
+    cache_key = f'adaptive_coach_{target.isoformat()}'
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    readiness_payload = compute_shared_readiness(log_df, target)
+    readiness_result = readiness_payload.get('result', {}) if isinstance(readiness_payload, dict) else {}
+    with perf_section('adaptive coach inputs'):
+        cardio_df = load_cardio_log(days=90)
+        apple_daily_df, _ = cached_get_apple_activity_daily(days=90)
+        apple_workouts_df, _ = cached_get_apple_workouts(days=90)
+        body_df = read_csv_safe(BODY, BODY_COLUMNS)
+        goals_payload = load_coach_goals()
+        preferences_payload = load_coach_preferences()
+
+    with perf_section('adaptive coach planning'):
+        plan = cached_build_daily_coaching_plan(
+            target.isoformat(),
+            readiness_result,
+            log_df.copy() if log_df is not None else pd.DataFrame(),
+            cardio_df.copy(),
+            apple_daily_df.copy() if apple_daily_df is not None else pd.DataFrame(),
+            apple_workouts_df.copy() if apple_workouts_df is not None else pd.DataFrame(),
+            body_df.copy(),
+            workouts_df.copy() if workouts_df is not None else pd.DataFrame(),
+            goals_payload,
+            preferences_payload,
+        )
+
+    payload = {
+        'target_date': target.isoformat(),
+        'plan': plan,
+        'goals': goals_payload,
+        'preferences': preferences_payload,
+    }
+    st.session_state[cache_key] = payload
+    st.session_state['shared_adaptive_plan_payload'] = payload
+    return payload
+
+
 def get_mobile_primary_page() -> str:
     mapping = {
         'Dashboard': 'Dashboard',
         'AI Personal Trainer': 'AI Personal Trainer',
         'Workout': "Today's Workout",
+        'Quick Log': 'Quick Log',
         'Gym Mode': 'Gym Mode',
         'History': 'History',
         'Progress': 'Progress Analytics',
@@ -871,12 +1071,13 @@ def get_mobile_primary_page() -> str:
         st.session_state['mobile_more_active'] = False
 
     forced_mobile_target = st.session_state.get('mobile_nav_override')
-    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More']:
+    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']:
         st.session_state['mobile_primary_nav'] = forced_mobile_target
 
-    current = str(st.session_state.get('main_nav', 'Dashboard'))
+    current = str(st.session_state.get('active_route', st.session_state.get('main_nav', 'Dashboard')))
     reverse = {
         "Today's Workout": 'Workout',
+        'Quick Log': 'Quick Log',
         'Progress Analytics': 'Progress',
         'Apple Activity': 'More',
         'Recovery & Readiness': 'More',
@@ -886,15 +1087,15 @@ def get_mobile_primary_page() -> str:
     st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
     selected = st.radio(
         'Mobile Primary Navigation',
-        ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'],
+        ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'],
         horizontal=True,
         key='mobile_primary_nav',
-        index=['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
+        index=['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
         label_visibility='collapsed',
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Gym Mode', 'History', 'Progress', 'More'] and selected != forced_mobile_target:
+    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'] and selected != forced_mobile_target:
         selected = forced_mobile_target
     if 'mobile_nav_override' in st.session_state:
         st.session_state.pop('mobile_nav_override', None)
@@ -919,13 +1120,19 @@ def get_mobile_primary_page() -> str:
             'System Check',
         ]
         more_target = st.selectbox('More', more_options, key='mobile_more_select')
-        st.session_state['main_nav'] = more_target
+        set_active_route(more_target)
         return more_target
 
     st.session_state['mobile_more_active'] = False
     target = mapping[selected]
-    st.session_state['main_nav'] = target
+    set_active_route(target)
     return target
+
+
+def set_active_route(route: str) -> None:
+    target = str(route or 'Dashboard')
+    st.session_state['active_route'] = target
+    st.session_state['main_nav'] = target
 
 
 def get_rest_timer_state(flow_key: str) -> dict:
@@ -1240,15 +1447,75 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
                 f"- {item.get('exercise')}: {item.get('suggested_action')} -> {float(item.get('suggested_weight', 0) or 0):.1f} lbs for {item.get('suggested_rep_range')} (last: {float(item.get('last_weight', 0) or 0):.1f} x {float(item.get('last_reps', 0) or 0):.0f} @ RPE {float(item.get('last_rpe', 0) or 0):.1f})"
             )
 
+    adaptive_payload = st.session_state.get('shared_adaptive_plan_payload', {})
+    adaptive_plan = adaptive_payload.get('plan', {}) if isinstance(adaptive_payload, dict) else {}
+    st.markdown('### AI COACH REVIEW')
+    target_category = _to_text(adaptive_plan.get('recommended_category', 'Strength'), 'Strength')
+    target_focus = _to_text(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'N/A')))
+    target_rpe = float(adaptive_plan.get('rpe_ceiling', 0) or 0)
+    target_volume_adjust = int(adaptive_plan.get('volume_adjustment_percent', 0) or 0)
+    sr1, sr2, sr3 = st.columns(3)
+    sr1.metric('Target Category', target_category)
+    sr2.metric('Target Focus', target_focus)
+    sr3.metric('Target RPE Ceiling', f"{target_rpe:.1f}" if target_rpe > 0 else 'N/A')
+    if session_sets:
+        st.markdown(f"- Performance met target: {'Yes' if metrics.get('avg_rpe', 0) <= target_rpe or target_rpe <= 0 else 'No'}")
+        st.markdown(f"- Volume achieved: {int(metrics.get('total_volume', 0) or 0):,} lbs ({target_volume_adjust:+d}% planned adjustment)")
+        st.markdown(f"- RPE compared with target: {float(metrics.get('avg_rpe', 0) or 0):.1f} vs target ceiling {target_rpe:.1f}" if target_rpe > 0 else f"- Session average RPE: {float(metrics.get('avg_rpe', 0) or 0):.1f}")
+        st.markdown(f"- PRs: {len(prs)}")
+    if cardio_rows:
+        latest_cardio = cardio_df.iloc[-1] if 'cardio_df' in locals() and not cardio_df.empty else {}
+        st.markdown(f"- Cardio duration achieved: {float(latest_cardio.get('duration_minutes', 0) or 0):.1f} min")
+        st.markdown(f"- Cardio distance achieved: {float(latest_cardio.get('distance_miles', 0) or 0):.2f} mi")
+        st.markdown(f"- Cardio RPE: {float(latest_cardio.get('rpe', 0) or 0):.1f}")
+        st.markdown(f"- HR response: {int(float(latest_cardio.get('average_heart_rate', 0) or 0)) if float(latest_cardio.get('average_heart_rate', 0) or 0) > 0 else 0} bpm average")
+    review_notes = []
+    if metrics.get('avg_rpe', 0) and target_rpe > 0 and float(metrics.get('avg_rpe', 0)) <= target_rpe:
+        review_notes.append('What went well: effort stayed within target range.')
+    if prs:
+        review_notes.append('What went well: new PR signals were detected.')
+    if target_rpe > 0 and float(metrics.get('avg_rpe', 0) or 0) > target_rpe:
+        review_notes.append('What to adjust: reduce next-session load or total sets slightly.')
+    if cardio_rows:
+        review_notes.append('Next-session target: account for cardio load before lower-body progression.')
+    if not review_notes:
+        review_notes.append('Next-session target: repeat the session with clean technique and consistent logging.')
+    for line in review_notes[:4]:
+        st.markdown(f"- {line}")
+
+    feedback_existing = load_coaching_feedback()
+    already_feedback = False
+    if not feedback_existing.empty and session_id:
+        already_feedback = feedback_existing['workout_session_id'].astype(str).str.strip().eq(session_id).any()
+    if not already_feedback and session_id:
+        st.markdown('### Coaching Feedback')
+        feedback_rating = st.radio('How accurate was today\'s recommendation?', ['Too Easy', 'About Right', 'Too Hard', 'Wrong Focus', 'Great Recommendation'], horizontal=True, key=f'{flow_key}_coach_feedback_rating')
+        feedback_note = st.text_area('Optional feedback note', key=f'{flow_key}_coach_feedback_note')
+        if st.button('Save Coaching Feedback', key=f'{flow_key}_coach_feedback_save', width='stretch'):
+            save_coaching_feedback_row({
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'workout_session_id': session_id,
+                'recommendation_date': str(date.today()),
+                'recommended_category': target_category,
+                'recommended_focus': target_focus,
+                'readiness_score': int(adaptive_plan.get('readiness_score', readiness_result.get('readiness_score', 0)) or 0),
+                'feedback_rating': feedback_rating,
+                'notes': _to_text(feedback_note, ''),
+            })
+            st.success('Coaching feedback saved.')
+            st.rerun()
+    elif already_feedback:
+        st.caption('Coaching feedback already saved for this session.')
+
     c1, c2, c3 = st.columns(3)
     if c1.button('View History', key=f'{flow_key}_summary_history', width='stretch'):
-        st.session_state['main_nav'] = 'History'
+        set_active_route('History')
         st.rerun()
     if c2.button('View Progress', key=f'{flow_key}_summary_progress', width='stretch'):
-        st.session_state['main_nav'] = 'Progress Analytics'
+        set_active_route('Progress Analytics')
         st.rerun()
     if c3.button('Return to Dashboard', key=f'{flow_key}_summary_dashboard', width='stretch'):
-        st.session_state['main_nav'] = 'Dashboard'
+        set_active_route('Dashboard')
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1743,7 +2010,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
         priorities.append('Maintain current progression plan and prioritize execution quality.')
 
     lines = [
-        'Brian Fit 7.5 Weekly Coaching Report',
+        f'{DISPLAY_NAME} Weekly Coaching Report',
         f'Workouts completed: {workouts_completed}',
         f'Weekly volume: {weekly_volume:,} lbs',
         f'Muscle groups trained: {", ".join(muscles_trained) if muscles_trained else "N/A"}',
@@ -1756,7 +2023,7 @@ def build_weekly_coaching_report(log_df: pd.DataFrame, workouts_df: pd.DataFrame
     ] + [f'- {p}' for p in priorities]
     text_report = '\n'.join(lines)
 
-    html_report = '<h2>Brian Fit 7.5 Weekly Coaching Report</h2>'
+    html_report = f'<h2>{DISPLAY_NAME} Weekly Coaching Report</h2>'
     html_report += f'<p><b>Workouts completed:</b> {workouts_completed}<br><b>Weekly volume:</b> {weekly_volume:,} lbs<br><b>Muscle groups trained:</b> {", ".join(muscles_trained) if muscles_trained else "N/A"}<br><b>PRs achieved:</b> {prs_achieved}<br><b>Consistency score:</b> {consistency_score}/100</p>'
     html_report += f'<p><b>Strongest progress:</b> {", ".join(strongest_progress) if strongest_progress else "None detected"}<br><b>Exercises stalled:</b> {", ".join(stalled) if stalled else "None detected"}<br><b>Recovery summary:</b> {recovery_summary}</p>'
     html_report += '<h3>Suggested priorities for next week</h3><ul>' + ''.join([f'<li>{p}</li>' for p in priorities]) + '</ul>'
@@ -2237,12 +2504,12 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Quick Log","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
-st.sidebar.markdown("## 🏋️ Brian Fit 7.5")
-st.sidebar.caption("X.19 Unified Strength + Cardio Logger")
+st.sidebar.markdown(f"## 🏋️ {DISPLAY_NAME}")
+st.sidebar.caption(BUILD_LABEL)
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
 page = get_mobile_primary_page()
-st.session_state['main_nav'] = page
+set_active_route(page)
 st.session_state['perf_sections'] = {}
 
 needs_workouts = page in {
@@ -2254,12 +2521,15 @@ needs_log = page in {
     'Quick Log', 'Workout Builder', 'Weekly Coaching Report', 'Progress Analytics', 'History', 'Recovery & Readiness',
 }
 needs_readiness = page in {'Dashboard', 'AI Personal Trainer', 'Recovery & Readiness'}
+needs_coaching = page in {'Dashboard', 'AI Personal Trainer', 'History', 'Progress Analytics'}
 
 workouts = pd.DataFrame()
 log = pd.DataFrame()
 shared_readiness_payload = {}
 shared_readiness_result = {}
 shared_readiness_history = pd.DataFrame()
+shared_adaptive_plan_payload = {}
+shared_adaptive_plan = {}
 
 if needs_workouts:
     with perf_section('static exercise database loading'):
@@ -2272,6 +2542,10 @@ if needs_readiness:
     shared_readiness_payload = compute_shared_readiness(log)
     shared_readiness_result = shared_readiness_payload.get('result', {}) if isinstance(shared_readiness_payload, dict) else {}
     shared_readiness_history = shared_readiness_payload.get('history_df', pd.DataFrame()) if isinstance(shared_readiness_payload, dict) else pd.DataFrame()
+
+if needs_coaching:
+    shared_adaptive_plan_payload = compute_shared_adaptive_plan(log, workouts)
+    shared_adaptive_plan = shared_adaptive_plan_payload.get('plan', {}) if isinstance(shared_adaptive_plan_payload, dict) else {}
 
 days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 
@@ -2293,6 +2567,7 @@ if page == "Dashboard":
         supplements_df=supplements_df,
         workout_log_df=log,
     )
+    adaptive_plan = shared_adaptive_plan if isinstance(shared_adaptive_plan, dict) else {}
 
     muscle_snapshot = build_muscle_readiness_snapshot(
         workout_log_df=log,
@@ -2350,12 +2625,12 @@ if page == "Dashboard":
 
     st.markdown(textwrap.dedent(f"""
     <div class="x-hero" style="margin-bottom:14px;">
-                <div class="x-kicker">Brian Fit 7.5 • X.19 Unified Strength + Cardio Logger</div>
+                <div class="x-kicker">{DISPLAY_KICKER}</div>
       <div class="x-title" style="font-size:2.35rem;">Good Morning Brian</div>
       <div class="x-sub">Recovery {recovery_score}% • Readiness {readiness_status} • Today's Focus: {focus}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
         <div class="small"><b>Last Workout:</b> {last_workout_text}<br><b>Workout Streak:</b> {streak} day(s)</div>
-        <div class="small"><b>Weekly Progress:</b> {weekly_progress_pct}% ({sessions_7}/5 sessions)<br><b>AI Note:</b> {coach_brief.next_best_action}</div>
+        <div class="small"><b>Weekly Progress:</b> {weekly_progress_pct}% ({sessions_7}/5 sessions)<br><b>AI Note:</b> {_to_text(adaptive_plan.get('main_reason', coach_brief.next_best_action))}</div>
       </div>
     </div>
     """), unsafe_allow_html=True)
@@ -2363,7 +2638,7 @@ if page == "Dashboard":
     start_col, _ = st.columns([0.28, 0.72])
     with start_col:
         if st.button('▶ START WORKOUT', width='stretch', key='x8_start_workout'):
-            st.session_state['main_nav'] = "Today's Workout"
+            set_active_route("Today's Workout")
             st.rerun()
 
     metric_cards = [
@@ -2393,17 +2668,25 @@ if page == "Dashboard":
     st.markdown(
         f"""
         <div class="side-card" style="margin-bottom:10px;">
-          <div class="side-title">Today\'s Recommendation</div>
-          <div class="small"><b>Recommendation:</b> {coach_brief.next_best_action}</div>
-          <div class="small" style="margin-top:7px;"><b>Training Plan:</b> {coach_brief.training_recommendation}</div>
-          <div class="small" style="margin-top:7px;"><b>Water Goal:</b> {water_today}/100 oz today</div>
-          <div class="small" style="margin-top:7px;"><b>Protein Goal:</b> {protein_today}/160g today</div>
-          <div class="small" style="margin-top:7px;"><b>Sleep Goal:</b> 7.5 - 9.0 hours</div>
-          <div class="small" style="margin-top:7px;"><b>Recovery Note:</b> {rec_card['note']}</div>
+                    <div class="side-title">Today\'s Coaching Plan</div>
+                    <div class="small"><b>Recommendation:</b> {_to_text(adaptive_plan.get('recommended_focus', 'Recommendation unavailable'))}</div>
+                    <div class="small" style="margin-top:7px;"><b>Category:</b> {_to_text(adaptive_plan.get('recommended_category', 'Strength'))}</div>
+                    <div class="small" style="margin-top:7px;"><b>Intensity:</b> {_to_text(adaptive_plan.get('intensity_level', 'Moderate'))}</div>
+                    <div class="small" style="margin-top:7px;"><b>Duration:</b> {int(adaptive_plan.get('duration_minutes', 0) or 0)} min</div>
+                    <div class="small" style="margin-top:7px;"><b>Readiness:</b> {int(adaptive_plan.get('readiness_score', recovery_score) or recovery_score)}/100 • {_to_text(adaptive_plan.get('recovery_status', readiness_status))}</div>
+                    <div class="small" style="margin-top:7px;"><b>Main reason:</b> {_to_text(adaptive_plan.get('main_reason', rec_card['note']))}</div>
+                    <div class="small" style="margin-top:7px;"><b>Confidence:</b> {_to_text(adaptive_plan.get('confidence_label', 'Limited confidence'))} ({int(float(adaptive_plan.get('confidence_score', 0) or 0))}%)</div>
+                    <div class="small" style="margin-top:7px;"><b>Water Goal:</b> {water_today}/100 oz today</div>
+                    <div class="small" style="margin-top:7px;"><b>Protein Goal:</b> {protein_today}/160g today</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    if st.button('Start Plan', width='stretch', key='dashboard_start_adaptive_plan'):
+        set_active_route('AI Personal Trainer')
+        st.session_state['mobile_nav_override'] = 'AI Personal Trainer'
+        st.session_state['ai80_show_preview'] = True
+        st.rerun()
 
     st.markdown('### Daily Readiness')
     dr1, dr2, dr3, dr4 = st.columns(4)
@@ -2418,7 +2701,7 @@ if page == "Dashboard":
     rr2.metric('HRV', f"{str(readiness_result.get('activity_context', {}).get('heart_rate_variability_ms', 'N/A'))} ms")
     rr3.metric('Resting HR', f"{str(readiness_result.get('activity_context', {}).get('resting_heart_rate', 'N/A'))} bpm")
     if st.button('View Recovery Details', width='stretch', key='dashboard_view_recovery_details'):
-        st.session_state['main_nav'] = 'Recovery & Readiness'
+        set_active_route('Recovery & Readiness')
         st.rerun()
 
     st.markdown('### Progress Snapshot')
@@ -2522,6 +2805,11 @@ elif page == "AI Personal Trainer":
     readiness_result = shared_readiness_result if isinstance(shared_readiness_result, dict) else {}
     next_workout = apply_readiness_to_next_workout(next_workout, readiness_result)
     weekly_report = build_weekly_coaching_report(cloud_log, workouts, recovery_snapshot, progression, plateau)
+    adaptive_payload = shared_adaptive_plan_payload if isinstance(shared_adaptive_plan_payload, dict) else compute_shared_adaptive_plan(cloud_log, workouts)
+    adaptive_plan = adaptive_payload.get('plan', {}) if isinstance(adaptive_payload, dict) else {}
+    coach_goals = adaptive_payload.get('goals', {}) if isinstance(adaptive_payload, dict) else load_coach_goals()
+    coach_preferences = adaptive_payload.get('preferences', {}) if isinstance(adaptive_payload, dict) else load_coach_preferences()
+    feedback_df = load_coaching_feedback()
 
     today_s = str(date.today())
     today_nut = nutrition_df[nutrition_df['date'].astype(str) == today_s] if not nutrition_df.empty and 'date' in nutrition_df.columns else pd.DataFrame()
@@ -2576,29 +2864,72 @@ elif page == "AI Personal Trainer":
     if readiness_result.get('confidence_score') is not None:
         training_confidence = int(max(30, min(96, (training_confidence * 0.45) + (float(readiness_result.get('confidence_score', 0)) * 0.55))))
     training_confidence = int(max(20, min(98, training_confidence + int(cardio_ai.get('load_modifier', 0) or 0))))
+    adaptive_confidence = int(float(adaptive_plan.get('confidence_score', training_confidence) or training_confidence))
 
     st.markdown('<div class="ai-coach-shell">', unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="ai-hero">
-                    <div class="ai-kicker">Brian Fit 7.5 • X.19 Unified Strength + Cardio Logger</div>
+                    <div class="ai-kicker">{DISPLAY_KICKER}</div>
           <div class="ai-greet">Good Morning Brian</div>
-          <div class="ai-sub">Recovery score {adjusted_recovery}% • Readiness {readiness_status} • Today\'s recommendation {next_workout.get('focus', 'N/A')}</div>
+          <div class="ai-sub">Recovery score {int(adaptive_plan.get('readiness_score', adjusted_recovery) or adjusted_recovery)}% • Readiness {_to_text(adaptive_plan.get('recovery_status', readiness_status))} • Today\'s recommendation {_to_text(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'N/A')))}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    st.markdown('### TODAY\'S COACHING PLAN')
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric('Readiness', f"{int(adaptive_plan.get('readiness_score', adjusted_recovery) or adjusted_recovery)}/100")
+    p2.metric('Recovery Status', _to_text(adaptive_plan.get('recovery_status', readiness_status)))
+    p3.metric('Workout Category', _to_text(adaptive_plan.get('recommended_category', 'Strength')))
+    p4.metric('Confidence', f"{adaptive_confidence}%")
+    p5, p6, p7, p8 = st.columns(4)
+    p5.metric('Recommended Focus', _to_text(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'N/A'))))
+    p6.metric('Intensity', _to_text(adaptive_plan.get('intensity_level', next_workout.get('intensity', 'Moderate'))))
+    p7.metric('Duration', f"{int(adaptive_plan.get('duration_minutes', next_workout.get('estimated_duration_min', 0)) or 0)} min")
+    p8.metric('Volume', f"{int(adaptive_plan.get('volume_adjustment_percent', 0) or 0):+d}%")
+    st.caption(f"Main reason: {_to_text(adaptive_plan.get('main_reason', next_workout.get('coaching_note', 'Recommendation unavailable.')))}")
+    st.caption(_to_text(adaptive_plan.get('safety_note', 'Training recommendations are estimates based on logged fitness and activity data. They are not medical advice.')))
+
     h1, h2, h3, h4 = st.columns(4)
     h1.metric('Recovery Score', f"{adjusted_recovery}%")
     h2.metric('Readiness', readiness_status)
-    h3.metric('Recommended Workout', str(next_workout.get('focus', 'N/A')))
-    h4.metric('Estimated Duration', f"{int(next_workout.get('estimated_duration_min', 0))} min")
+    h3.metric('Recommended Workout', _to_text(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'N/A'))))
+    h4.metric('Estimated Duration', f"{int(adaptive_plan.get('duration_minutes', next_workout.get('estimated_duration_min', 0)) or 0)} min")
 
     cta_col, conf_col = st.columns([1.2, 1])
-    if cta_col.button('Start Recommended Workout', width='stretch', key='ai71_start_recommended'):
-        st.session_state['ai71_show_preview'] = True
-    conf_col.markdown(f'<div class="ai-card"><div class="ai-card-title">Training Confidence</div><div class="ai-big">{int(training_confidence)}%</div><div class="small">Based on recent sessions, progression signals, and recovery trends.</div></div>', unsafe_allow_html=True)
+    if cta_col.button('Start Recommended Workout', width='stretch', key='ai80_start_recommended'):
+        st.session_state['ai80_show_preview'] = True
+    conf_col.markdown(f'<div class="ai-card"><div class="ai-card-title">Training Confidence</div><div class="ai-big">{adaptive_confidence}%</div><div class="small">{_to_text(adaptive_plan.get("confidence_label", "Limited confidence"))}. Based on real workout, cardio, Apple, and readiness coverage.</div></div>', unsafe_allow_html=True)
+
+    with st.expander('Goals and Coach Preferences', expanded=False):
+        primary_goal = st.selectbox('Primary goal', ['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'], index=['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'].index(_to_text(coach_goals.get('primary_goal', 'Improve Fitness'), 'Improve Fitness')) if _to_text(coach_goals.get('primary_goal', 'Improve Fitness'), 'Improve Fitness') in ['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'] else 2)
+        secondary_goals = st.multiselect('Secondary goals', ['Increase weekly workouts', 'Improve sleep', 'Increase steps', 'Improve cardio consistency', 'Improve protein consistency', 'Improve recovery'], default=list(coach_goals.get('secondary_goals', [])))
+        d1, d2 = st.columns(2)
+        preferred_workout_duration = d1.selectbox('Preferred workout duration', [30, 40, 45, 55, 60, 75, 90], index=[30, 40, 45, 55, 60, 75, 90].index(int(coach_preferences.get('preferred_workout_duration', 55) or 55)) if int(coach_preferences.get('preferred_workout_duration', 55) or 55) in [30, 40, 45, 55, 60, 75, 90] else 3)
+        training_days_per_week = d2.selectbox('Training days per week', [2, 3, 4, 5, 6, 7], index=[2, 3, 4, 5, 6, 7].index(int(coach_preferences.get('training_days_per_week', 5) or 5)) if int(coach_preferences.get('training_days_per_week', 5) or 5) in [2, 3, 4, 5, 6, 7] else 3)
+        preferred_cardio_types = st.multiselect('Preferred cardio types', ALL_ACTIVITY_TYPES, default=[item for item in coach_preferences.get('preferred_cardio_types', []) if item in ALL_ACTIVITY_TYPES])
+        e1, e2 = st.columns(2)
+        preferred_strength_split = e1.selectbox('Preferred strength split', ['Balanced Split', 'Push Pull Legs', 'Upper Lower', 'Body Part Split', 'Full Body'], index=['Balanced Split', 'Push Pull Legs', 'Upper Lower', 'Body Part Split', 'Full Body'].index(_to_text(coach_preferences.get('preferred_strength_split', 'Balanced Split'), 'Balanced Split')) if _to_text(coach_preferences.get('preferred_strength_split', 'Balanced Split'), 'Balanced Split') in ['Balanced Split', 'Push Pull Legs', 'Upper Lower', 'Body Part Split', 'Full Body'] else 0)
+        equipment_access = e2.selectbox('Equipment access', ['Full Gym', 'LA Fitness', 'Home Dumbbells', 'Machines Only', 'Limited Equipment'], index=['Full Gym', 'LA Fitness', 'Home Dumbbells', 'Machines Only', 'Limited Equipment'].index(_to_text(coach_preferences.get('equipment_access', 'Full Gym'), 'Full Gym')) if _to_text(coach_preferences.get('equipment_access', 'Full Gym'), 'Full Gym') in ['Full Gym', 'LA Fitness', 'Home Dumbbells', 'Machines Only', 'Limited Equipment'] else 0)
+        aggressiveness = st.selectbox('Aggressiveness', ['Conservative', 'Balanced', 'Progressive'], index=['Conservative', 'Balanced', 'Progressive'].index(_to_text(coach_preferences.get('aggressiveness', 'Balanced'), 'Balanced')) if _to_text(coach_preferences.get('aggressiveness', 'Balanced'), 'Balanced') in ['Conservative', 'Balanced', 'Progressive'] else 1)
+        avoided_exercises = st.text_input('Avoided exercises', value=', '.join(coach_preferences.get('avoided_exercises', [])))
+        preferred_rest_days = st.multiselect('Preferred rest days', days, default=[item for item in coach_preferences.get('preferred_rest_days', []) if item in days])
+        if st.button('Save Goals and Preferences', width='stretch', key='ai80_save_profile'):
+            save_coach_goals(primary_goal, secondary_goals)
+            save_coach_preferences({
+                'preferred_workout_duration': preferred_workout_duration,
+                'training_days_per_week': training_days_per_week,
+                'preferred_cardio_types': preferred_cardio_types,
+                'preferred_strength_split': preferred_strength_split,
+                'equipment_access': equipment_access,
+                'aggressiveness': aggressiveness,
+                'avoided_exercises': [item.strip() for item in avoided_exercises.split(',') if item.strip()],
+                'preferred_rest_days': preferred_rest_days,
+            })
+            st.success('Coach profile saved.')
+            st.rerun()
 
     if not bool(next_workout.get('has_sufficient_history')):
         st.info('Complete more workouts to improve personalized coaching.')
@@ -2652,35 +2983,65 @@ elif page == "AI Personal Trainer":
         if p_match:
             first_reason = f"Last session completed at {float(p_match.get('last_weight', 0) or 0):.1f} lbs for {float(p_match.get('last_reps', 0) or 0):.0f} reps with RPE {float(p_match.get('last_rpe', 0) or 0):.1f}."
 
+    adaptive_exercises = list(adaptive_plan.get('recommended_exercises', []) or rec_exercises)
     st.markdown('<div class="ai-rec-card">', unsafe_allow_html=True)
     st.markdown('### Today\'s Recommendation')
-    st.markdown(f"**Workout Focus:** {next_workout.get('focus', 'N/A')}")
-    st.markdown(f"**Recommended Intensity:** {next_workout.get('intensity', 'Moderate')}")
-    st.markdown(f"**Estimated Duration:** {int(next_workout.get('estimated_duration_min', 0))} min")
-    if rec_exercises:
-        for ex in rec_exercises[:8]:
+    st.markdown(f"**Workout Category:** {_to_text(adaptive_plan.get('recommended_category', 'Strength'))}")
+    st.markdown(f"**Workout Focus:** {_to_text(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'N/A')))}")
+    st.markdown(f"**Recommended Intensity:** {_to_text(adaptive_plan.get('intensity_level', next_workout.get('intensity', 'Moderate')))}")
+    st.markdown(f"**Estimated Duration:** {int(adaptive_plan.get('duration_minutes', next_workout.get('estimated_duration_min', 0)) or 0)} min")
+    if adaptive_exercises:
+        for ex in adaptive_exercises[:8]:
             st.markdown(
                 f"- **{ex.get('exercise')}** | {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs | {int(ex.get('suggested_sets', 3) or 3)} sets | {ex.get('suggested_rep_range', '8-12')} reps | {int(ex.get('rest_seconds', 90) or 90)} sec rest"
             )
     else:
         st.caption('Complete more workouts to improve personalized coaching.')
-    st.caption(f"Reason: {first_reason or reason_line or 'Complete more workouts to improve personalized coaching.'}")
+    adaptive_cardio = adaptive_plan.get('cardio_recommendation', {}) if isinstance(adaptive_plan, dict) else {}
+    if adaptive_cardio:
+        st.markdown(f"- **Cardio block:** {_to_text(adaptive_cardio.get('activity_type', 'Cardio'))} • {int(adaptive_cardio.get('duration_minutes', 0) or 0)} min • {_to_text(adaptive_cardio.get('intensity', 'Easy'))} • RPE {float(adaptive_cardio.get('rpe_target', 0) or 0):.1f}")
+    st.caption(f"Reason: {_to_text(adaptive_plan.get('main_reason', first_reason or reason_line or 'Complete more workouts to improve personalized coaching.'))}")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if bool(st.session_state.get('ai71_show_preview', False)):
+    st.markdown('### Why This Plan?')
+    st.markdown(f"**Why:** {_to_text(adaptive_plan.get('why_this_plan', 'Recommendation unavailable.'))}")
+    st.markdown(f"**Positive factors:** {', '.join([str(x) for x in adaptive_plan.get('positive_factors', [])]) or 'None'}")
+    st.markdown(f"**Limiting factors:** {', '.join([str(x) for x in adaptive_plan.get('limiting_factors', [])]) or 'None'}")
+    st.markdown(f"**Missing data:** {', '.join([str(x) for x in adaptive_plan.get('missing_data', [])]) or 'None'}")
+
+    st.markdown('### Cardio Impact on Today\'s Plan')
+    st.markdown(f"- Weekly cardio minutes: {int(adaptive_plan.get('cardio_summary', {}).get('weekly_minutes', cardio_ai.get('weekly_minutes', 0)) or 0)}")
+    st.markdown(f"- Weekly cardio sessions: {int(adaptive_plan.get('cardio_summary', {}).get('weekly_sessions', cardio_ai.get('weekly_sessions', 0)) or 0)}")
+    if adaptive_plan.get('recommended_category') in {'Strength', 'Mixed'} and adaptive_plan.get('cardio_summary', {}).get('weekly_minutes', 0):
+        st.markdown(f"- Reason: {_to_text(adaptive_plan.get('main_reason', 'Cardio load influenced today\'s recommendation.'))}")
+
+    st.markdown('### Next 7 Days')
+    for item in adaptive_plan.get('next_7_day_outlook', [])[:7]:
+        st.markdown(
+            f"- **{item.get('day')}**: {item.get('recommended_category')} • {item.get('focus')} • readiness {int(item.get('estimated_readiness', 0) or 0)}/100 • {int(item.get('duration_minutes', 0) or 0)} min • {item.get('confidence')}"
+        )
+
+    if bool(st.session_state.get('ai80_show_preview', False)):
         st.markdown('<div class="ai-card">', unsafe_allow_html=True)
         st.markdown('### Recommended Workout Preview')
         st.caption('Confirm to load this recommendation into today\'s active workout. Existing plan remains unchanged unless confirmed.')
-        for ex in rec_exercises[:8]:
+        st.markdown(f"**Category:** {_to_text(adaptive_plan.get('recommended_category', 'Strength'))}")
+        st.markdown(f"**Focus:** {_to_text(adaptive_plan.get('recommended_focus', 'Recommendation unavailable'))}")
+        st.markdown(f"**Intensity:** {_to_text(adaptive_plan.get('intensity_level', 'Moderate'))} • **RPE ceiling:** {float(adaptive_plan.get('rpe_ceiling', 0) or 0):.1f}")
+        st.markdown(f"**Duration:** {int(adaptive_plan.get('duration_minutes', 0) or 0)} min")
+        for ex in adaptive_exercises[:8]:
             st.markdown(f"- {ex.get('exercise')} • {int(ex.get('suggested_sets', 3) or 3)} sets • {ex.get('suggested_rep_range', '8-12')} • {float(ex.get('suggested_starting_weight', 0) or 0):.1f} lbs")
+        if adaptive_cardio:
+            st.markdown(f"- Cardio: {_to_text(adaptive_cardio.get('activity_type', 'Cardio'))} • {int(adaptive_cardio.get('duration_minutes', 0) or 0)} min • {_to_text(adaptive_cardio.get('intensity', 'Easy'))}")
         p1, p2 = st.columns(2)
-        if p1.button('Confirm and Load Workout', width='stretch', key='ai71_confirm_load'):
+        if p1.button('Confirm and Load Workout', width='stretch', key='ai80_confirm_load'):
+            category = _to_text(adaptive_plan.get('recommended_category', 'Strength'), 'Strength')
             day_for_plan = str(date.today().strftime('%A'))
             rows = []
-            for ex in rec_exercises:
+            for ex in adaptive_exercises:
                 rows.append({
                     'day': day_for_plan,
-                    'muscle_group': str(next_workout.get('focus', 'AI Focus')),
+                    'muscle_group': str(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'AI Focus'))),
                     'exercise': str(ex.get('exercise', '')),
                     'target_sets': int(ex.get('suggested_sets', 3) or 3),
                     'target_reps': str(ex.get('suggested_rep_range', '8-12')),
@@ -2690,16 +3051,31 @@ elif page == "AI Personal Trainer":
             st.session_state['recommended_workout_active'] = {
                 'active_day': day_for_plan,
                 'rows': rows,
-                'focus': str(next_workout.get('focus', 'AI Focus')),
+                'focus': str(adaptive_plan.get('recommended_focus', next_workout.get('focus', 'AI Focus'))),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
-            st.session_state['ai71_show_preview'] = False
-            st.session_state['mobile_primary_nav'] = 'Workout'
-            st.session_state['mobile_nav_override'] = 'Workout'
-            st.session_state['main_nav'] = 'Gym Mode'
+            st.session_state['active_adaptive_plan'] = adaptive_plan
+            st.session_state['ai80_show_preview'] = False
+            if category in {'Cardio', 'Sport', 'Recovery'}:
+                st.session_state['quicklog_workout_type'] = 'Sport' if category == 'Sport' else 'Cardio'
+                if category == 'Recovery':
+                    st.session_state['quicklog_workout_type'] = 'Cardio'
+                st.session_state['mobile_primary_nav'] = 'Quick Log'
+                st.session_state['mobile_nav_override'] = 'Quick Log'
+                set_active_route('Quick Log')
+            elif category == 'Mixed':
+                st.session_state['gym_workout_type'] = 'Mixed'
+                st.session_state['mobile_primary_nav'] = 'Gym Mode'
+                st.session_state['mobile_nav_override'] = 'Gym Mode'
+                set_active_route('Gym Mode')
+            else:
+                st.session_state['gym_workout_type'] = 'Strength'
+                st.session_state['mobile_primary_nav'] = 'Gym Mode'
+                st.session_state['mobile_nav_override'] = 'Gym Mode'
+                set_active_route('Gym Mode')
             st.rerun()
-        if p2.button('Cancel Preview', width='stretch', key='ai71_cancel_preview'):
-            st.session_state['ai71_show_preview'] = False
+        if p2.button('Cancel Preview', width='stretch', key='ai80_cancel_preview'):
+            st.session_state['ai80_show_preview'] = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2875,13 +3251,13 @@ elif page == "AI Personal Trainer":
 
     mobile_actions = st.columns(3)
     if mobile_actions[0].button('View Today\'s Plan', width='stretch', key='ai71_mobile_view_plan'):
-        st.session_state['main_nav'] = "Today's Workout"
+        set_active_route("Today's Workout")
         st.rerun()
     if mobile_actions[1].button('View Recovery', width='stretch', key='ai71_mobile_recovery'):
-        st.session_state['main_nav'] = 'Recovery & Readiness'
+        set_active_route('Recovery & Readiness')
         st.rerun()
     if mobile_actions[2].button('View Progress', width='stretch', key='ai71_mobile_progress'):
-        st.session_state['main_nav'] = 'Progress Analytics'
+        set_active_route('Progress Analytics')
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2906,7 +3282,7 @@ elif page == "Today's Workout":
 
     st.markdown(f"""
     <div class="x6-hero">
-      <div class="x6-kicker">Brian Fitness Tracker X • Sprint X.6 Elite Workout Experience</div>
+            <div class="x6-kicker">{DISPLAY_KICKER} • Sprint X.6 Elite Workout Experience</div>
       <div class="x6-title">{day} — {group}</div>
       <div class="x6-sub">One-exercise command center with large visuals, set logging, rest timing, progress, and workout finish summary.</div>
       <div class="x6-progress"><div class="x6-progress-fill" style="width:{progress_pct}%;"></div></div>
@@ -3179,7 +3555,7 @@ elif page == "Gym Mode":
     session_id = make_workout_session_id(flow_key)
     pending_sets = get_pending_sets(flow_key)
     pending_cardio = get_pending_cardio(flow_key)
-    st.markdown(f'<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Gym Mode</div><div class="sub">{day} — {group}. One exercise at a time with larger controls.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Gym Mode</div><div class="sub">{day} — {group}. One exercise at a time with larger controls.</div></div>', unsafe_allow_html=True)
     workout_type = render_workout_type_selector(flow_key, label='Workout Category')
 
     if workout_type in {'Cardio', 'Sport'}:
@@ -3366,11 +3742,29 @@ elif page == "Gym Mode":
 
 
 elif page == "Quick Log":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.5</div><div class="title">Quick Log</div><div class="sub">Fast one-column workout logging for strength, cardio, sport, or mixed sessions.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Quick Log</div><div class="sub">Fast one-column workout logging for strength, cardio, sport, mixed, or coach-guided recovery sessions.</div></div>', unsafe_allow_html=True)
     flow_key = 'quicklog'
     session_id = make_workout_session_id(flow_key)
     pending_cardio = get_pending_cardio(flow_key)
+    adaptive_plan = st.session_state.get('active_adaptive_plan', {}) if isinstance(st.session_state.get('active_adaptive_plan', {}), dict) else {}
     workout_type = render_workout_type_selector(flow_key, label='Workout Category')
+
+    if adaptive_plan:
+        st.markdown(f"**Active coach plan:** {_to_text(adaptive_plan.get('recommended_category', 'Strength'))} • {_to_text(adaptive_plan.get('recommended_focus', 'Recommendation unavailable'))} • {int(adaptive_plan.get('duration_minutes', 0) or 0)} min")
+        st.caption(_to_text(adaptive_plan.get('main_reason', '')))
+
+    if adaptive_plan and _to_text(adaptive_plan.get('recommended_category', ''), '') == 'Recovery':
+        st.markdown('### Recovery Plan')
+        for item in adaptive_plan.get('recovery_actions', []):
+            st.markdown(f"- {item}")
+        cardio_block = adaptive_plan.get('cardio_recommendation', {}) if isinstance(adaptive_plan, dict) else {}
+        if cardio_block:
+            st.markdown(f"- Recovery movement: {_to_text(cardio_block.get('activity_type', 'Walking'))} • {int(cardio_block.get('duration_minutes', 0) or 0)} min • {_to_text(cardio_block.get('intensity', 'Easy'))}")
+        if st.button('Open Recovery & Readiness', key='quick_recovery_open', width='stretch'):
+            set_active_route('Recovery & Readiness')
+            st.rerun()
+        summarize_perf(page)
+        st.stop()
 
     if workout_type in {'Cardio', 'Sport'}:
         render_cardio_logger(flow_key, session_id, mode_label=workout_type)
@@ -3538,7 +3932,7 @@ elif page == "AI Coach":
 
 
 elif page == "Weekly Coaching Report":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fit 7.5</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Weekly Coaching Report</div><div class="sub">Your weekly coaching summary from Supabase workout history. Training estimates only.</div></div>', unsafe_allow_html=True)
     log_week = load_log()
     workouts_week = load_workouts()
     progression_week = analyze_progressive_overload(log_week, workouts_week)
@@ -3587,7 +3981,7 @@ elif page == "Weekly Coaching Report":
     )
 
 elif page == "Workout Builder":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout Builder</div><div class="sub">Add exercises to your weekly plan without editing CSV files.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Workout Builder</div><div class="sub">Add exercises to your weekly plan without editing CSV files.</div></div>', unsafe_allow_html=True)
     builder_flow = 'builder'
     builder_session_id = make_workout_session_id(builder_flow)
     builder_type = render_workout_type_selector(builder_flow, label='Workout Category')
@@ -3696,7 +4090,7 @@ elif page == "Workout Builder":
         st.code(f"{suggested}.png")
 
 elif page == "Weekly Plan":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Weekly Plan</div><div class="sub">Days, muscle groups, and exercise count</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Weekly Plan</div><div class="sub">Days, muscle groups, and exercise count</div></div>', unsafe_allow_html=True)
     for day in days:
         d=workouts[workouts.day==day]
         group=d.muscle_group.iloc[0] if not d.empty else 'Rest'
@@ -3706,7 +4100,7 @@ elif page == "Weekly Plan":
 
 
 elif page == "System Check":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">System Check + Backup</div><div class="sub">Daily-use stability tools: validate workouts, images, files, and backups.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">System Check + Backup</div><div class="sub">Daily-use stability tools: validate workouts, images, files, and backups.</div></div>', unsafe_allow_html=True)
     issues=[]
     st.markdown("## Required Files")
     required_files=[WORKOUTS, LOG, MAP, NUTRITION, BODY, SUPPLEMENTS]
@@ -3764,7 +4158,7 @@ elif page == "System Check":
 
 
 elif page == "Nutrition":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Nutrition Engine</div><div class="sub">Track calories, protein, macros, water, and meals.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Nutrition Engine</div><div class="sub">Track calories, protein, macros, water, and meals.</div></div>', unsafe_allow_html=True)
     cols = ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes']
     nut = read_csv_safe(NUTRITION, cols)
     today_s = str(date.today())
@@ -3800,7 +4194,7 @@ elif page == "Nutrition":
     if NUTRITION.exists(): st.download_button('Export nutrition_log.csv', NUTRITION.read_bytes(), file_name='nutrition_log.csv')
 
 elif page == "Supplements":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Supplement Engine</div><div class="sub">Track supplement consistency, timing, and weekly completion. Not medical advice.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Supplement Engine</div><div class="sub">Track supplement consistency, timing, and weekly completion. Not medical advice.</div></div>', unsafe_allow_html=True)
     cols=['date','creatine','protein_powder','multivitamin','fish_oil','pre_workout','magnesium','vitamin_d','electrolytes','notes']
     plan_cols=['supplement','category','default_time','target_days_per_week','notes']
     sup=read_csv_safe(SUPPLEMENTS, cols)
@@ -3921,7 +4315,7 @@ elif page == "Apple Activity":
 
 
 elif page == "Progress Analytics":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Progress Engine</div><div class="sub">Personal records, volume trends, body stats, nutrition, and consistency analytics.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Progress Engine</div><div class="sub">Personal records, volume trends, body stats, nutrition, and consistency analytics.</div></div>', unsafe_allow_html=True)
     log = load_log()
     cardio_df, _, _, cardio_setup_warning = load_cardio_log(return_meta=True, days=None)
     nut = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
@@ -4002,7 +4396,8 @@ elif page == "Progress Analytics":
     if cardio_setup_warning:
         st.warning(cardio_setup_warning)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Strength', 'Cardio', 'Body', 'Nutrition', 'Supplements'])
+    coaching_feedback_df = load_coaching_feedback()
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['Strength', 'Cardio', 'Body', 'Nutrition', 'Supplements', 'Coach'])
     with tab1:
         if log.empty:
             st.info('No workout history yet. Save workouts to unlock strength analytics.')
@@ -4178,6 +4573,40 @@ elif page == "Progress Analytics":
             st.markdown('### Supplement Consistency')
             st.bar_chart(totals.set_index('supplement')['times_taken'])
             st.dataframe(totals, width='stretch')
+    with tab6:
+        if coaching_feedback_df.empty:
+            st.info('No coaching feedback saved yet. Save feedback after workouts to evaluate recommendation accuracy.')
+        else:
+            cdf = coaching_feedback_df.copy()
+            cdf['created_at'] = pd.to_datetime(cdf['created_at'], errors='coerce')
+            cdf = cdf.dropna(subset=['created_at'])
+            rating_counts = cdf.groupby('feedback_rating', as_index=False).size().rename(columns={'size': 'count'})
+            positive = int(cdf['feedback_rating'].astype(str).isin(['About Right', 'Great Recommendation']).sum())
+            total = int(len(cdf))
+            acceptance_rate = round((positive / total) * 100.0, 1) if total else 0.0
+            feedback_sessions = cdf['workout_session_id'].astype(str).str.strip().nunique()
+            planned_vs_completed = feedback_sessions
+            avg_readiness_feedback = float(pd.to_numeric(cdf.get('readiness_score', 0), errors='coerce').fillna(0).mean()) if not cdf.empty else 0.0
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric('Recommendation Acceptance', f'{acceptance_rate:.1f}%')
+            m2.metric('Feedback Sessions', str(feedback_sessions))
+            m3.metric('Planned vs Completed', str(planned_vs_completed))
+            m4.metric('Avg Readiness at Feedback', f'{avg_readiness_feedback:.1f}')
+            st.markdown('### Recommendation Accuracy')
+            st.bar_chart(rating_counts.set_index('feedback_rating')['count'])
+            ready_perf = cdf.groupby('feedback_rating', as_index=False)['readiness_score'].mean().sort_values('readiness_score', ascending=False)
+            if not ready_perf.empty:
+                st.markdown('### Readiness vs Feedback')
+                st.bar_chart(ready_perf.set_index('feedback_rating')['readiness_score'])
+            trend_df = cdf.copy()
+            trend_df['week'] = trend_df['created_at'].dt.to_period('W').astype(str)
+            weekly_feedback = trend_df.groupby('week', as_index=False).size().rename(columns={'size': 'responses'})
+            if not weekly_feedback.empty:
+                st.markdown('### Coaching Trend Summaries')
+                st.line_chart(weekly_feedback.set_index('week')['responses'])
+            latest_feedback = cdf.sort_values('created_at', ascending=False).head(8)
+            for _, row in latest_feedback.iterrows():
+                st.markdown(f"- {str(row.get('created_at', ''))[:10]} • {row.get('recommended_category', '')} • {row.get('recommended_focus', '')} • {row.get('feedback_rating', '')}")
 
 elif page == "Exercise Library":
     # Ensure Exercise Library route always uses latest page/component code on rerun.
@@ -4188,7 +4617,7 @@ elif page == "Exercise Library":
     exercise_library_page.render_exercise_library_page(ASSETS, workout_log_df=load_log())
 
 elif page == "History":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
     full_history = st.checkbox('Load full history (slower)', value=False, key='history_full_range')
     history_days = None if full_history else 90
     log, source, cloud_error = load_log(return_meta=True, days=history_days)
@@ -4202,6 +4631,7 @@ elif page == "History":
     if cardio_filter in {'Pickleball', 'Walking', 'Running', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'}:
         cardio_type = cardio_filter
     cardio_df, cardio_source, cardio_error, cardio_setup_warning = load_cardio_log(return_meta=True, days=history_days, activity_type=cardio_type)
+    coaching_feedback_df = load_coaching_feedback()
     apple_days = 90 if history_days is None else int(history_days)
     apple_df, apple_err = cached_get_apple_workouts(days=apple_days)
     apple_df = apple_df if isinstance(apple_df, pd.DataFrame) else pd.DataFrame()
@@ -4273,6 +4703,11 @@ elif page == "History":
             h5.metric('Total Volume', f"{int(float(s.get('total_volume', 0) or 0)):,} lbs")
             h6.metric('Average RPE', f"{float(s.get('avg_rpe', 0) or 0):.1f}")
             h7.metric('PR Count', str(int(s.get('pr_count', 0))))
+            if not coaching_feedback_df.empty and sid:
+                feedback_hit = coaching_feedback_df[coaching_feedback_df['workout_session_id'].astype(str).str.strip() == sid]
+                if not feedback_hit.empty:
+                    fr = feedback_hit.iloc[-1]
+                    st.caption(f"Coach target: {_to_text(fr.get('recommended_category', ''))} • {_to_text(fr.get('recommended_focus', ''))} | Feedback: {_to_text(fr.get('feedback_rating', ''))}")
             with st.expander(f"Open session {sid[:36]}"):
                 preferred_cols = [
                     'date','day','exercise','set_number','weight_lbs','reps','rpe','body_feedback_score','body_feedback_notes','volume','workout_session_id'
@@ -4316,6 +4751,12 @@ elif page == "History":
 
             linked = bool(_to_text(row.get('apple_workout_key', '')).strip())
             st.caption(f"Linked Apple workout: {'Yes' if linked else 'No'}")
+            cardio_sid = _to_text(row.get('workout_session_id', '')).strip()
+            if not coaching_feedback_df.empty and cardio_sid:
+                feedback_hit = coaching_feedback_df[coaching_feedback_df['workout_session_id'].astype(str).str.strip() == cardio_sid]
+                if not feedback_hit.empty:
+                    fr = feedback_hit.iloc[-1]
+                    st.caption(f"Coach target: {_to_text(fr.get('recommended_category', ''))} • {_to_text(fr.get('recommended_focus', ''))} | Feedback: {_to_text(fr.get('feedback_rating', ''))}")
             with st.expander('Open cardio entry details'):
                 detail = {k: row.get(k) for k in show_cols if k in row.index}
                 st.write(detail)
@@ -4341,7 +4782,7 @@ elif page == "History":
             st.markdown('</div>', unsafe_allow_html=True)
 
 elif page == "Data Manager":
-    st.markdown('<div class="hero"><div class="kicker">Brian Fitness Tracker X</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Data Manager</div><div class="sub">Important files before updates</div></div>', unsafe_allow_html=True)
     st.code('data/workout_log.csv\ndata/workouts.csv\ndata/exercise_image_map.csv\ndata/nutrition_log.csv\ndata/body_stats.csv\ndata/supplement_log.csv\ndata/supplement_plan.csv\nassets/exercises/')
 
     body_df = read_csv_safe(BODY, BODY_COLUMNS)
@@ -4441,6 +4882,49 @@ elif page == "Data Manager":
                 'last_sync_message': str(last_sync.get('message', '')),
                 'last_sync_error': str(last_sync.get('error', '')),
             })
+
+    st.markdown('### Database Feature Status')
+    feature_status, feature_err = get_database_feature_status()
+    if feature_err:
+        st.warning('Feature status unavailable. Check Supabase credentials and connectivity.')
+    elif not feature_status:
+        st.info('No database feature status available.')
+    else:
+        rows = []
+        for feature_name, meta in feature_status.items():
+            rows.append(
+                {
+                    'Feature': feature_name,
+                    'Status': str(meta.get('state', 'Missing')),
+                    'Table': str(meta.get('table', '')),
+                    'Optional': str(meta.get('optional', 'Yes')),
+                    'SQL': str(meta.get('sql', '')),
+                    'Details': str(meta.get('details', '')),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), width='stretch')
+
+    st.markdown('### Release Diagnostics')
+    last_perf = dict(st.session_state.get('perf_last_page', {}))
+    active_route = str(st.session_state.get('active_route', page))
+    apple_count, apple_count_err = get_apple_workouts_total_count()
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric('App version', DISPLAY_NAME)
+    r2.metric('Build label', BUILD_LABEL)
+    r3.metric('Supabase connected', 'Yes' if cloud_health.get('connected') else 'No')
+    r4.metric('Active route', active_route)
+
+    r5, r6, r7, r8 = st.columns(4)
+    r5.metric('Last page render time', f"{float(last_perf.get('render_ms', 0.0) or 0.0):.1f} ms")
+    r6.metric('Last successful strength save', str(last_save_debug.get('last_successful_sync_time', 'None')))
+    r7.metric('Last successful cardio save', str(last_save_debug.get('last_cardio_save_at', 'None')))
+    r8.metric('Apple data available', 'Yes' if not apple_count_err and int(apple_count or 0) > 0 else 'No')
+
+    r9, r10, r11 = st.columns(3)
+    r9.metric('Readiness engine available', 'Yes' if bool(shared_readiness_result) else 'No')
+    r10.metric('AI Coach available', 'Yes' if bool(shared_adaptive_plan) else 'No')
+    optional_missing = [name for name, meta in feature_status.items() if meta.get('state') == 'Missing' and meta.get('optional') == 'Yes'] if feature_status else []
+    r11.metric('Optional migration status', 'Ready' if not optional_missing else f"Missing: {len(optional_missing)}")
 
     st.markdown('### Performance Diagnostics')
     sections = dict(st.session_state.get('perf_sections', {}))
