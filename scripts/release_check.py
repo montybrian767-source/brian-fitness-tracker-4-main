@@ -64,10 +64,10 @@ def version_check() -> CheckResult:
     app_text = (ROOT / "app.py").read_text(encoding="utf-8")
     apple_text = (ROOT / "pages" / "apple_activity.py").read_text(encoding="utf-8")
     blockers = []
-    if 'APP_VERSION = "X 10.1"' not in version_text:
-        blockers.append('config/version.py is not set to X 10.1')
-    if 'X.31 Workout Execution Intelligence' not in version_text:
-        blockers.append('config/version.py is missing X.31 build label')
+    if 'APP_VERSION = "X 11.1"' not in version_text:
+        blockers.append('config/version.py is not set to X 11.1')
+    if 'X.41 Premium AI Coach Experience' not in version_text:
+        blockers.append('config/version.py is missing X.41 build label')
     for token in ["Brian Fit 7.4", "Brian Fit 7.5", "Brian Fit 8.0 • X.20 Adaptive AI Coach", "Brian Fitness Tracker X"]:
         if token in app_text:
             blockers.append(f"app.py still contains: {token}")

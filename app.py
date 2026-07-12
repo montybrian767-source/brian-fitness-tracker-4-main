@@ -41,6 +41,7 @@ from engines.recovery_readiness_engine import (
     estimate_recovery_impact_from_session,
 )
 from pages.apple_activity import render_apple_activity_page
+from pages.ai_personal_coach import render_ai_personal_coach
 from pages.recovery_readiness import render_recovery_readiness_page
 from services.supabase_service import (
     get_database_feature_status,
@@ -87,6 +88,7 @@ from pages.command_center import render_command_center
 from pages.recovery_center import render_recovery_center
 from pages.smart_scale_import import render_smart_scale_import_page
 from pages.system_center import render_system_center
+from styles.global_styles import inject_global_styles
 
 APP_DIR = Path(__file__).parent
 DATA = APP_DIR / "data"
@@ -742,6 +744,94 @@ def save_coach_preferences(preferences: dict) -> None:
     clear_ai_coach_cache()
     clear_local_shared_payloads()
     publish_event('preferences_updated', {'keys': list(preferences.keys()) if isinstance(preferences, dict) else []})
+
+
+def onboarding_completed() -> bool:
+    df = read_csv_safe(COACH_PREFERENCES, COACH_PREFERENCE_COLUMNS)
+    if df.empty:
+        return False
+    row = df.iloc[-1]
+    marker_fields = [
+        _to_text(row.get('preferred_workout_duration', ''), '').strip(),
+        _to_text(row.get('training_days_per_week', ''), '').strip(),
+        _to_text(row.get('equipment_access', ''), '').strip(),
+    ]
+    return any(marker_fields)
+
+
+def render_onboarding_flow() -> bool:
+    if onboarding_completed():
+        return True
+
+    st.markdown('## Welcome to Brian Fit')
+    st.caption('Set your profile once to personalize Today\'s Mission. You can edit this anytime in Coach.')
+    step = int(st.session_state.get('onboarding_step', 1) or 1)
+    step = max(1, min(8, step))
+
+    if step == 1:
+        st.info('Step 1 of 8: Welcome to Brian Fit')
+    elif step == 2:
+        st.info('Step 2 of 8: Primary fitness goal')
+    elif step == 3:
+        st.info('Step 3 of 8: Training days per week')
+    elif step == 4:
+        st.info('Step 4 of 8: Preferred workout duration')
+    elif step == 5:
+        st.info('Step 5 of 8: Preferred cardio')
+    elif step == 6:
+        st.info('Step 6 of 8: Equipment access')
+    elif step == 7:
+        st.info('Step 7 of 8: Apple Health import status')
+    else:
+        st.info('Step 8 of 8: Start first plan')
+
+    default_preferences = load_coach_preferences()
+    default_goals = load_coach_goals()
+
+    goal = st.selectbox(
+        'Primary fitness goal',
+        ['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'],
+        index=['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'].index(_to_text(default_goals.get('primary_goal', 'Improve Fitness'), 'Improve Fitness')) if _to_text(default_goals.get('primary_goal', 'Improve Fitness'), 'Improve Fitness') in ['Build Muscle', 'Lose Fat', 'Improve Fitness', 'Improve Strength', 'Improve Endurance', 'Pickleball Performance', 'General Health'] else 2,
+    )
+    days_per_week = st.selectbox('Training days per week', [2, 3, 4, 5, 6, 7], index=3)
+    duration = st.selectbox('Preferred workout duration', [30, 40, 45, 55, 60, 75, 90], index=3)
+    cardio_types = st.multiselect('Preferred cardio', ALL_ACTIVITY_TYPES, default=['Walking', 'Pickleball'])
+    equipment_access = st.selectbox('Equipment access', ['Full Gym', 'LA Fitness', 'Home Dumbbells', 'Machines Only', 'Limited Equipment'], index=0)
+    apple_imported = st.selectbox('Apple Health import status', ['Not yet', 'Imported'])
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button('Back', width='stretch', disabled=step == 1):
+        st.session_state['onboarding_step'] = max(1, step - 1)
+        st.rerun()
+    if c2.button('Next', width='stretch', disabled=step == 8):
+        st.session_state['onboarding_step'] = min(8, step + 1)
+        st.rerun()
+    if c3.button('Skip for now', width='stretch'):
+        st.session_state['onboarding_skipped'] = True
+        return True
+
+    if st.button('Start First Plan', width='stretch', key='onboarding_start_plan'):
+        save_coach_goals(goal, [])
+        save_coach_preferences(
+            {
+                'preferred_workout_duration': duration,
+                'training_days_per_week': days_per_week,
+                'preferred_cardio_types': cardio_types,
+                'preferred_strength_split': 'Balanced Split',
+                'equipment_access': equipment_access,
+                'aggressiveness': 'Balanced',
+                'avoided_exercises': [],
+                'preferred_rest_days': ['Sunday'],
+            }
+        )
+        if apple_imported == 'Not yet':
+            st.info('Import an Apple Health export to unlock activity and recovery insights.')
+        st.success('Onboarding complete. You can edit these preferences later in Coach.')
+        st.session_state['onboarding_completed'] = True
+        return True
+
+    st.caption('Edit later in Coach > Goals and Coach Preferences.')
+    return False
 
 
 def load_coaching_feedback() -> pd.DataFrame:
@@ -1551,16 +1641,11 @@ def compute_shared_daily_command(log_df: pd.DataFrame, workouts_df: pd.DataFrame
 
 def get_mobile_primary_page() -> str:
     mapping = {
-        'Command Center': 'Command Center',
-        'Dashboard': 'Dashboard',
-        'AI Personal Trainer': 'AI Personal Trainer',
+        'Mission': 'Command Center',
+        'Coach': 'AI Personal Trainer',
         'Workout': "Today's Workout",
-        'Quick Log': 'Quick Log',
-        'Gym Mode': 'Gym Mode',
         'History': 'History',
         'Progress': 'Progress Analytics',
-        'Apple Activity': 'Apple Activity',
-        'Recovery & Readiness': 'Recovery & Readiness',
         'More': 'More',
     }
 
@@ -1568,22 +1653,41 @@ def get_mobile_primary_page() -> str:
         st.session_state['mobile_more_active'] = False
 
     forced_mobile_target = st.session_state.get('mobile_nav_override')
-    if forced_mobile_target in ['Command Center', 'Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']:
+    legacy_override = {
+        'Command Center': 'Mission',
+        'Dashboard': 'Mission',
+        'AI Personal Trainer': 'Coach',
+        'AI Coach': 'Coach',
+        'Gym Mode': 'Workout',
+        "Today's Workout": 'Workout',
+        'Quick Log': 'Workout',
+        'History': 'History',
+        'Progress': 'Progress',
+        'Progress Analytics': 'Progress',
+    }
+    forced_mobile_target = legacy_override.get(forced_mobile_target, forced_mobile_target)
+    if forced_mobile_target in ['Mission', 'Coach', 'Workout', 'History', 'Progress', 'More']:
         st.session_state['mobile_primary_nav'] = forced_mobile_target
 
     default_route = default_home_route()
     current = str(st.session_state.get('active_route', st.session_state.get('main_nav', default_route)))
     reverse = {
-        'Command Center': 'Command Center',
+        'Command Center': 'Mission',
+        'Dashboard': 'Mission',
+        'AI Personal Trainer': 'Coach',
         "Today's Workout": 'Workout',
-        'Quick Log': 'Quick Log',
         'Progress Analytics': 'Progress',
-        'Apple Activity': 'More',
+        'AI Coach': 'Coach',
         'Recovery & Readiness': 'More',
+        'Apple Activity': 'More',
+        'Nutrition': 'More',
+        'Body Stats': 'More',
+        'Exercise Library': 'More',
+        'System Center': 'More',
     }
     current_mobile = reverse.get(current, current if current in mapping else default_route)
 
-    nav_choices = ['Command Center', 'Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']
+    nav_choices = ['Mission', 'Coach', 'Workout', 'History', 'Progress', 'More']
 
     st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
     selected = st.radio(
@@ -1604,25 +1708,25 @@ def get_mobile_primary_page() -> str:
     if selected == 'More':
         st.session_state['mobile_more_active'] = True
         more_options = [
-            'AI Coach',
-            'Quick Log',
-            'Workout Builder',
-            'Weekly Plan',
-            'Weekly Coaching Report',
-            'Apple Activity',
+            'Apple Intelligence',
             'Recovery & Readiness',
-            'Recovery Center',
             'Nutrition',
-            'Supplements',
             'Body Stats',
-            'Smart Scale',
             'Exercise Library',
-            'Data Manager',
-            'System Check',
+            'System Center',
         ]
         more_target = st.selectbox('More', more_options, key='mobile_more_select')
-        set_active_route(more_target)
-        return more_target
+        route_map = {
+            'Apple Intelligence': 'Apple Activity',
+            'Recovery & Readiness': 'Recovery & Readiness',
+            'Nutrition': 'Nutrition',
+            'Body Stats': 'Body Stats',
+            'Exercise Library': 'Exercise Library',
+            'System Center': 'System Center',
+        }
+        target_route = route_map.get(more_target, 'Command Center')
+        set_active_route(target_route)
+        return target_route
 
     st.session_state['mobile_more_active'] = False
     target = mapping[selected]
@@ -3105,12 +3209,25 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+inject_global_styles()
 
 # Navigation — desktop sidebar + phone-friendly top menu
 nav_options = ["Command Center","Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Quick Log","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","System Center","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
 st.sidebar.markdown(f"## 🏋️ {DISPLAY_NAME}")
 st.sidebar.caption(BUILD_LABEL)
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
+
+with st.sidebar.expander('Developer Navigation', expanded=False):
+    dev_target = st.selectbox('Open internal route', nav_options, index=0, key='dev_route_target')
+    if st.button('Open Route', width='stretch', key='dev_open_route'):
+        set_active_route(dev_target)
+        st.rerun()
+
+if not onboarding_completed() and not bool(st.session_state.get('onboarding_skipped', False)):
+    onboarding_ready = render_onboarding_flow()
+    if not onboarding_ready:
+        summarize_perf('Onboarding')
+        st.stop()
 
 page = get_mobile_primary_page()
 set_active_route(page)
@@ -3156,20 +3273,53 @@ days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 if page == 'Command Center':
     daily_payload = compute_shared_daily_command(log, workouts)
     daily_command = daily_payload.get('daily_command', {}) if isinstance(daily_payload, dict) else {}
+
+    cardio_for_week = load_cardio_log(days=7)
+    cardio_for_week = cardio_for_week if isinstance(cardio_for_week, pd.DataFrame) else pd.DataFrame()
+    cardio_for_week['duration_minutes'] = pd.to_numeric(cardio_for_week.get('duration_minutes', 0), errors='coerce').fillna(0)
+    pkl_sessions = int((cardio_for_week.get('activity_type', pd.Series(dtype=str)).astype(str).str.lower() == 'pickleball').sum()) if not cardio_for_week.empty else 0
+    cardio_minutes = int(cardio_for_week['duration_minutes'].sum()) if not cardio_for_week.empty else None
+    step_total = daily_command.get('health_summary', {}).get('steps') if isinstance(daily_command.get('health_summary', {}), dict) else None
+    latest_pr = build_pr_summary(log).get('latest_pr') if isinstance(build_pr_summary(log), dict) else None
+    weight_lbs = daily_command.get('health_summary', {}).get('weight_lbs') if isinstance(daily_command.get('health_summary', {}), dict) else None
+
+    daily_command['daily_snapshot'] = {
+        'apple_activity_status': 'Available' if not (daily_command.get('health_summary', {}) or {}).get('missing_data') else 'Not available',
+        'steps': step_total,
+        'exercise_minutes': (daily_command.get('health_summary', {}) or {}).get('exercise_minutes'),
+        'sleep_hours': (daily_command.get('health_summary', {}) or {}).get('sleep_hours'),
+        'hrv_ms': (daily_command.get('health_summary', {}) or {}).get('heart_rate_variability_ms'),
+        'resting_hr_bpm': (daily_command.get('health_summary', {}) or {}).get('resting_heart_rate'),
+        'weekly_workouts': int(pd.to_datetime(log.get('date', pd.Series(dtype='datetime64[ns]')), errors='coerce').dropna().dt.date.nunique()) if isinstance(log, pd.DataFrame) and not log.empty and 'date' in log.columns else None,
+        'weekly_cardio_minutes': cardio_minutes,
+        'latest_pr': latest_pr,
+        'body_weight_lbs': f"{float(weight_lbs):.1f} lbs" if weight_lbs is not None and str(weight_lbs) != '' else None,
+    }
+    daily_command['weekly_mission_extended'] = {
+        'pickleball_sessions': pkl_sessions,
+        'pickleball_target': 2,
+        'step_total': step_total,
+        'step_goal': 70000,
+        'recovery_days': int((cardio_for_week.get('duration_minutes', pd.Series(dtype=float)) < 20).sum()) if not cardio_for_week.empty else None,
+        'recovery_target': 2,
+        'workout_streak': workout_streak_days(log) if isinstance(log, pd.DataFrame) and not log.empty else None,
+        'streak_target': 7,
+    }
+
     action = render_command_center(daily_command)
 
     if action == 'start_workout':
-        st.session_state['mobile_nav_override'] = 'Gym Mode'
-        set_active_route('Gym Mode')
+        st.session_state['mobile_nav_override'] = 'Workout'
+        set_active_route("Today's Workout")
         st.rerun()
     if action == 'preview_workout':
         set_active_route('AI Personal Trainer')
-        st.session_state['mobile_nav_override'] = 'AI Personal Trainer'
+        st.session_state['mobile_nav_override'] = 'Coach'
         st.session_state['ai80_show_preview'] = True
         st.rerun()
     if action == 'adjust_plan':
         set_active_route('AI Personal Trainer')
-        st.session_state['mobile_nav_override'] = 'AI Personal Trainer'
+        st.session_state['mobile_nav_override'] = 'Coach'
         st.rerun()
     if action == 'recovery_instead':
         set_active_route('Recovery & Readiness')
@@ -3418,6 +3568,60 @@ elif page == "Dashboard":
         st.dataframe(recent_prs.head(10), width='stretch')
 
 elif page == "AI Personal Trainer":
+    coach_log = load_log(days=90)
+    coach_cardio = load_cardio_log(days=90)
+    coach_nutrition = read_csv_safe(NUTRITION, ['date','meal','calories','protein_g','carbs_g','fat_g','water_oz','notes'])
+    coach_feedback = load_coaching_feedback()
+    coach_readiness = shared_readiness_result if isinstance(shared_readiness_result, dict) else {}
+    coach_adaptive = shared_adaptive_plan if isinstance(shared_adaptive_plan, dict) else {}
+    with perf_section('AI coach apple context'):
+        coach_apple_daily, _ = cached_get_apple_activity_daily(days=90)
+    coach_action = render_ai_personal_coach(
+        {
+            'log_df': coach_log,
+            'cardio_df': coach_cardio,
+            'nutrition_df': coach_nutrition,
+            'feedback_df': coach_feedback,
+            'readiness_result': coach_readiness,
+            'adaptive_plan': coach_adaptive,
+            'apple_daily_df': coach_apple_daily,
+            'memory_path': DATA / 'coach_memory_observations.csv',
+        }
+    )
+    if coach_action == 'start_workout':
+        set_active_route("Today's Workout")
+        st.session_state['mobile_nav_override'] = 'Workout'
+        st.rerun()
+    if coach_action == 'preview_workout':
+        st.session_state['ai80_show_preview'] = True
+        st.rerun()
+    if coach_action == 'recovery_plan':
+        set_active_route('Recovery & Readiness')
+        st.session_state['mobile_nav_override'] = 'More'
+        st.rerun()
+    if coach_action == 'log_cardio':
+        set_active_route('Quick Log')
+        st.session_state['mobile_nav_override'] = 'Workout'
+        st.rerun()
+    if coach_action == 'nutrition':
+        set_active_route('Nutrition')
+        st.session_state['mobile_nav_override'] = 'More'
+        st.rerun()
+    if coach_action == 'recovery_walk' or coach_action == 'stretch':
+        set_active_route('Recovery & Readiness')
+        st.session_state['mobile_nav_override'] = 'More'
+        st.rerun()
+    if coach_action == 'hydration' or coach_action == 'sleep':
+        set_active_route('Nutrition')
+        st.session_state['mobile_nav_override'] = 'More'
+        st.rerun()
+    if coach_action == 'review_yesterday':
+        set_active_route('History')
+        st.session_state['mobile_nav_override'] = 'History'
+        st.rerun()
+    summarize_perf(page)
+    st.stop()
+
     cloud_log = load_log()
     cardio_ai_df = load_cardio_log(days=90)
     cardio_ai = build_cardio_ai_insights(cardio_ai_df)
@@ -4075,6 +4279,15 @@ elif page == "Today's Workout":
                     st.warning('One replacement option was skipped because it was missing a valid exercise name.')
                     continue
 
+                match_score = float(candidate.get('similarity_score', 0) or 0)
+                if match_score >= 85:
+                    match_label = 'Excellent Match'
+                elif match_score >= 70:
+                    match_label = 'Strong Match'
+                else:
+                    match_label = 'Acceptable Alternative'
+                recommended_target = float(candidate.get('recommended_start_weight', 0) or 0)
+
                 swap_key = safe_key(
                     f"{session_id}_{int(st.session_state.x6_idx)}_{exercise_name}_{replacement_name}",
                     prefix='swap',
@@ -4082,22 +4295,25 @@ elif page == "Today's Workout":
                 s1, s2, s3 = st.columns([1.6, 1.2, 0.9])
                 with s1:
                     st.markdown(
-                        f"**{replacement_name}**  \n"
-                        f"{_to_text(candidate.get('reason', 'Similar training purpose'))}"
+                        f"<div style='background:#0b1a2d;border:1px solid rgba(96,165,250,.32);border-radius:14px;padding:12px;'>"
+                        f"<div style='display:flex;justify-content:space-between;gap:8px;'><b>{replacement_name}</b><span class='badge'>{match_label}</span></div>"
+                        f"<div class='small' style='margin-top:6px;'>Why it matches: {_to_text(candidate.get('reason', 'Similar training purpose'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Primary muscle: {_to_text(candidate.get('primary_muscle', 'General'))} • Movement: {_to_text(candidate.get('movement_pattern', 'General'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Equipment: {_to_text(candidate.get('equipment', 'General'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Recommended starting target: {recommended_target:.1f} lb</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
                     perf_line = _to_text(candidate.get('previous_performance', ''), '').strip()
                     if perf_line:
-                        st.caption(f"Previous: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
+                        st.caption(f"Previous performance: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
                     else:
                         st.caption('No replacement history yet. Select a starting weight around RPE 6-7.')
                 with s2:
-                    st.caption(
-                        f"Primary: {_to_text(candidate.get('primary_muscle', 'General'))}  |  "
-                        f"Equipment: {_to_text(candidate.get('equipment', 'General'))}"
-                    )
-                    st.caption(f"Match score: {float(candidate.get('similarity_score', 0)):.1f}")
+                    st.metric('Match Quality', match_label)
+                    st.metric('Match Score', f"{match_score:.1f}")
                 with s3:
-                    if st.button('Use This Exercise', key=f"{swap_key}_use", width='stretch'):
+                    if st.button('Use Exercise', key=f"{swap_key}_use", width='stretch'):
                         replacement = replacement_name
                         image_file = _to_text(candidate.get('image_file', ''), '').strip()
                         if not image_file:
@@ -4137,7 +4353,7 @@ elif page == "Today's Workout":
                         st.session_state[f'{flow_key}_swap_open_idx'] = None
                         st.success(f"Swapped {exercise_name} -> {replacement}. Position and session are preserved.")
                         st.rerun()
-                    if st.button('View Exercise', key=f"{swap_key}_view", width='stretch'):
+                    if st.button('View Details', key=f"{swap_key}_view", width='stretch'):
                         st.info(f"Exercise detail: {replacement_name} • {_to_text(candidate.get('equipment', 'General'))}")
             if st.button('Cancel Swap', key=f'{flow_key}_swap_cancel_{st.session_state.x6_idx}', width='stretch'):
                 st.session_state[f'{flow_key}_swap_open_idx'] = None
@@ -4210,6 +4426,9 @@ elif page == "Today's Workout":
                 timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 execution_feedback = build_execution_feedback(row, result, (last_weight, last_reps, best_weight), exercise_data, target_rpe_hint or '7', int(_to_int(rest_hint or 90, 90)))
                 st.session_state[f'{flow_key}_last_execution_feedback'] = execution_feedback
+                st.session_state[f'{flow_key}_live_recommendation'] = _to_text(execution_feedback.get('suggestion', ''), '')
+                if _to_text(execution_feedback.get('suggestion', ''), '').strip():
+                    st.info(f"Coach: {_to_text(execution_feedback.get('suggestion', ''), '')}")
                 if float(execution_feedback.get('confidence', 0) or 0) >= 90:
                     st.session_state[f'{flow_key}_recent_pr_burst'] = {
                         'headline': 'New PR detected' if float(result.get('weight', 0) or 0) >= float(best_weight or 0) else 'Strong set logged',
@@ -4500,6 +4719,15 @@ elif page == "Gym Mode":
                     st.warning('One replacement option was skipped because it was missing a valid exercise name.')
                     continue
 
+                match_score = float(candidate.get('similarity_score', 0) or 0)
+                if match_score >= 85:
+                    match_label = 'Excellent Match'
+                elif match_score >= 70:
+                    match_label = 'Strong Match'
+                else:
+                    match_label = 'Acceptable Alternative'
+                recommended_target = float(candidate.get('recommended_start_weight', 0) or 0)
+
                 swap_key = safe_key(
                     f"{session_id}_{int(idx)}_{exercise_name}_{replacement_name}",
                     prefix='swap',
@@ -4507,22 +4735,25 @@ elif page == "Gym Mode":
                 c1, c2, c3 = st.columns([1.6, 1.2, 0.9])
                 with c1:
                     st.markdown(
-                        f"**{replacement_name}**  \n"
-                        f"{_to_text(candidate.get('reason', 'Similar training purpose'))}"
+                        f"<div style='background:#0b1a2d;border:1px solid rgba(96,165,250,.32);border-radius:14px;padding:12px;'>"
+                        f"<div style='display:flex;justify-content:space-between;gap:8px;'><b>{replacement_name}</b><span class='badge'>{match_label}</span></div>"
+                        f"<div class='small' style='margin-top:6px;'>Why it matches: {_to_text(candidate.get('reason', 'Similar training purpose'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Primary muscle: {_to_text(candidate.get('primary_muscle', 'General'))} • Movement: {_to_text(candidate.get('movement_pattern', 'General'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Equipment: {_to_text(candidate.get('equipment', 'General'))}</div>"
+                        f"<div class='small' style='margin-top:6px;'>Recommended starting target: {recommended_target:.1f} lb</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
                     perf_line = _to_text(candidate.get('previous_performance', ''), '').strip()
                     if perf_line:
-                        st.caption(f"Previous: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
+                        st.caption(f"Previous performance: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
                     else:
                         st.caption('No replacement history yet. Select a starting weight around RPE 6-7.')
                 with c2:
-                    st.caption(
-                        f"Primary: {_to_text(candidate.get('primary_muscle', 'General'))}  |  "
-                        f"Equipment: {_to_text(candidate.get('equipment', 'General'))}"
-                    )
-                    st.caption(f"Match score: {float(candidate.get('similarity_score', 0)):.1f}")
+                    st.metric('Match Quality', match_label)
+                    st.metric('Match Score', f"{match_score:.1f}")
                 with c3:
-                    if st.button('Use This Exercise', key=f"{swap_key}_use", width='stretch'):
+                    if st.button('Use Exercise', key=f"{swap_key}_use", width='stretch'):
                         replacement = replacement_name
                         image_file = _to_text(candidate.get('image_file', ''), '').strip()
                         if not image_file:
@@ -4565,7 +4796,7 @@ elif page == "Gym Mode":
                         st.session_state[f'{flow_key}_swap_open_idx'] = None
                         st.success(f"Swapped {exercise_name} -> {replacement}. Position and session are preserved.")
                         st.rerun()
-                    if st.button('View Exercise', key=f"{swap_key}_view", width='stretch'):
+                    if st.button('View Details', key=f"{swap_key}_view", width='stretch'):
                         st.info(f"Exercise detail: {replacement_name} • {_to_text(candidate.get('equipment', 'General'))}")
             if st.button('Cancel Swap', key=f'{flow_key}_swap_cancel_{idx}', width='stretch'):
                 st.session_state[f'{flow_key}_swap_open_idx'] = None
@@ -4636,6 +4867,9 @@ elif page == "Gym Mode":
                 timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 execution_feedback = build_execution_feedback(row, result, last_stats, exercise_data, _to_text(exercise_data.get('target_rpe', '7'), '7'), int(_to_int(exercise_data.get('rest_seconds', 90), 90)))
                 st.session_state[f'{flow_key}_last_execution_feedback'] = execution_feedback
+                st.session_state[f'{flow_key}_live_recommendation'] = _to_text(execution_feedback.get('suggestion', ''), '')
+                if _to_text(execution_feedback.get('suggestion', ''), '').strip():
+                    st.info(f"Coach: {_to_text(execution_feedback.get('suggestion', ''), '')}")
                 if float(execution_feedback.get('confidence', 0) or 0) >= 90:
                     st.session_state[f'{flow_key}_recent_pr_burst'] = {
                         'headline': 'New PR detected' if float(result.get('weight', 0) or 0) >= float(last_stats[2] or 0) else 'Strong set logged',
@@ -5385,20 +5619,24 @@ elif page == "Progress Analytics":
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['Strength', 'Cardio', 'Body', 'Nutrition', 'Supplements', 'Coach'])
     with tab1:
         if log.empty:
-            st.info('No workout history yet. Save workouts to unlock strength analytics.')
+            st.info('Complete your first workout to begin tracking progress.')
         else:
-            st.markdown('### Weekly Workout Volume')
-            daily = log.groupby('date', as_index=False)['volume'].sum().sort_values('date')
-            st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
-            st.line_chart(daily.set_index('date')['volume'])
-            st.markdown('</div>', unsafe_allow_html=True)
+            load_strength_charts = st.checkbox('Load strength charts', value=False, key='progress_load_strength')
+            if load_strength_charts:
+                st.markdown('### Weekly Workout Volume')
+                daily = log.groupby('date', as_index=False)['volume'].sum().sort_values('date')
+                st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+                st.line_chart(daily.set_index('date')['volume'])
+                st.markdown('</div>', unsafe_allow_html=True)
 
-            st.markdown('### Workout Frequency')
-            freq = log.groupby('date', as_index=False).size()
-            freq.columns = ['date', 'sessions']
-            st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
-            st.bar_chart(freq.set_index('date')['sessions'])
-            st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown('### Workout Frequency')
+                freq = log.groupby('date', as_index=False).size()
+                freq.columns = ['date', 'sessions']
+                st.markdown('<div class="chart-shell">', unsafe_allow_html=True)
+                st.bar_chart(freq.set_index('date')['sessions'])
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.caption('Load strength charts on demand to keep initial page load fast.')
 
             if 'exercise' in log.columns:
                 st.markdown('### Exercise Strength Trend')
@@ -5445,7 +5683,7 @@ elif page == "Progress Analytics":
             st.markdown('<div class="side-card"><div class="side-title">Smart Progress Read</div><div class="small">If you complete all target reps with body feedback under 3/10 and RPE under 8, increase next week by 5 lb for upper-body machines or 2.5 lb for cable movements.</div></div>', unsafe_allow_html=True)
     with tab2:
         if cardio_df.empty:
-            st.info('No cardio history yet. Log cardio in Today\'s Workout, Gym Mode, or Workout Builder.')
+            st.info('Log a cardio or sport session to build your endurance profile.')
         else:
             cdf = cardio_df.copy()
             cdf['activity_date'] = pd.to_datetime(cdf['activity_date'], errors='coerce')
@@ -5453,6 +5691,7 @@ elif page == "Progress Analytics":
             if cdf.empty:
                 st.info('No valid cardio dates available.')
             else:
+                load_cardio_charts = st.checkbox('Load cardio charts', value=False, key='progress_load_cardio')
                 cdf['week'] = cdf['activity_date'].dt.to_period('W').astype(str)
                 cdf['month'] = cdf['activity_date'].dt.to_period('M').astype(str)
 
@@ -5463,14 +5702,17 @@ elif page == "Progress Analytics":
                     calories=('calories_burned', 'sum'),
                 )
 
-                st.markdown('### Cardio Minutes by Week')
-                st.line_chart(weekly.set_index('week')['minutes'])
-                st.markdown('### Sessions by Week')
-                st.bar_chart(weekly.set_index('week')['sessions'])
-                st.markdown('### Distance by Week')
-                st.line_chart(weekly.set_index('week')['distance_miles'])
-                st.markdown('### Calories by Week')
-                st.line_chart(weekly.set_index('week')['calories'])
+                if load_cardio_charts:
+                    st.markdown('### Cardio Minutes by Week')
+                    st.line_chart(weekly.set_index('week')['minutes'])
+                    st.markdown('### Sessions by Week')
+                    st.bar_chart(weekly.set_index('week')['sessions'])
+                    st.markdown('### Distance by Week')
+                    st.line_chart(weekly.set_index('week')['distance_miles'])
+                    st.markdown('### Calories by Week')
+                    st.line_chart(weekly.set_index('week')['calories'])
+                else:
+                    st.caption('Load cardio charts on demand to keep initial page load fast.')
 
                 hr_df = cdf[cdf['average_heart_rate'] > 0].groupby('activity_date', as_index=False)['average_heart_rate'].mean()
                 if not hr_df.empty:
@@ -5524,10 +5766,13 @@ elif page == "Progress Analytics":
         if body.empty:
             st.info('No body stats yet. Use Body Stats page to start tracking weight and waist.')
         else:
+            load_body_chart = st.checkbox('Load body-weight chart', value=False, key='progress_load_body')
             st.markdown('### Body Weight Trend')
             bw = body.dropna(subset=['body_weight_lbs']).sort_values('date')
-            if not bw.empty:
+            if not bw.empty and load_body_chart:
                 st.line_chart(bw.set_index('date')['body_weight_lbs'])
+            elif not load_body_chart:
+                st.caption('Load chart on demand to reduce initial render cost.')
             st.markdown('### Body Stats Table')
             st.dataframe(body.tail(100), width='stretch')
     with tab4:
@@ -5665,13 +5910,19 @@ elif page == "History":
 
     st.markdown('### Brian Fit Strength Sessions')
     if not show_strength or log.empty:
-        st.info('No workouts saved yet.')
+        st.info('Complete your first workout to begin tracking progress.')
     else:
         display_log = log.copy()
         display_log['body_feedback_score'] = resolve_body_feedback_score(display_log)
         display_log['body_feedback_notes'] = resolve_body_feedback_notes(display_log)
         sessions = group_sessions(display_log)
-        for _, s in sessions.iterrows():
+        strength_page_size = st.selectbox('Strength sessions per page', [6, 10, 15], index=1, key='history_strength_page_size')
+        strength_total = len(sessions.index)
+        strength_pages = max(1, (strength_total + strength_page_size - 1) // strength_page_size)
+        strength_page = st.number_input('Strength page', min_value=1, max_value=strength_pages, value=1, step=1, key='history_strength_page')
+        s_start = (int(strength_page) - 1) * int(strength_page_size)
+        s_end = s_start + int(strength_page_size)
+        for _, s in sessions.iloc[s_start:s_end].iterrows():
             sid = str(s.get('session_key', ''))
             session_rows = display_log.copy()
             if 'workout_session_id' in session_rows.columns and sid:
@@ -5717,10 +5968,17 @@ elif page == "History":
 
     st.markdown('### Brian Fit Cardio Sessions')
     if not show_cardio or cardio_df.empty:
-        st.info('No cardio sessions found for selected filter/date range.')
+        st.info('Log a cardio or sport session to build your endurance profile.')
     else:
         show_cols = ['activity_date', 'activity_type', 'duration_minutes', 'distance_value', 'distance_unit', 'calories_burned', 'average_heart_rate', 'rpe', 'source', 'apple_workout_key']
-        for _, row in cardio_df.sort_values(['activity_date', 'created_at'], ascending=False).head(300).iterrows():
+        cardio_rows = cardio_df.sort_values(['activity_date', 'created_at'], ascending=False)
+        cardio_page_size = st.selectbox('Cardio sessions per page', [8, 12, 20], index=1, key='history_cardio_page_size')
+        cardio_total = len(cardio_rows.index)
+        cardio_pages = max(1, (cardio_total + cardio_page_size - 1) // cardio_page_size)
+        cardio_page = st.number_input('Cardio page', min_value=1, max_value=cardio_pages, value=1, step=1, key='history_cardio_page')
+        c_start = (int(cardio_page) - 1) * int(cardio_page_size)
+        c_end = c_start + int(cardio_page_size)
+        for _, row in cardio_rows.iloc[c_start:c_end].iterrows():
             st.markdown('<div class="history-session-card">', unsafe_allow_html=True)
             h1, h2, h3, h4 = st.columns(4)
             h1.metric('Date', _to_text(row.get('activity_date', '')))
@@ -5751,9 +6009,16 @@ elif page == "History":
     if apple_err:
         st.caption(f'Apple workout note: {apple_err}')
     if not show_apple or apple_df.empty:
-        st.info('No Apple workouts found for selected filter/date range.')
+        st.info('Import an Apple Health export to unlock activity and recovery insights.')
     else:
-        for _, row in apple_df.sort_values('start_time', ascending=False).head(300).iterrows():
+        apple_rows = apple_df.sort_values('start_time', ascending=False)
+        apple_page_size = st.selectbox('Apple workouts per page', [8, 12, 20], index=1, key='history_apple_page_size')
+        apple_total = len(apple_rows.index)
+        apple_pages = max(1, (apple_total + apple_page_size - 1) // apple_page_size)
+        apple_page = st.number_input('Apple page', min_value=1, max_value=apple_pages, value=1, step=1, key='history_apple_page')
+        a_start = (int(apple_page) - 1) * int(apple_page_size)
+        a_end = a_start + int(apple_page_size)
+        for _, row in apple_rows.iloc[a_start:a_end].iterrows():
             st.markdown('<div class="history-session-card">', unsafe_allow_html=True)
             a1, a2, a3, a4 = st.columns(4)
             a1.metric('Date', _to_text(row.get('activity_date', '')))

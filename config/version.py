@@ -1,6 +1,6 @@
-APP_VERSION = "X 10.1"
+APP_VERSION = "X 11.1"
 APP_NAME = "Brian Fit"
-BUILD_LABEL = "X.31 Workout Execution Intelligence"
+BUILD_LABEL = "X.41 Premium AI Coach Experience"
 
 DISPLAY_NAME = f"{APP_NAME} {APP_VERSION}"
 DISPLAY_KICKER = f"{DISPLAY_NAME} • {BUILD_LABEL}"

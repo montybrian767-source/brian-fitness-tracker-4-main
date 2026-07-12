@@ -192,17 +192,17 @@ def workout_command_center(
     vol = int(weight * reps)
     st.markdown(f'<div style="background:#07111f;border-radius:12px;padding:12px;margin-bottom:12px;"><div style="color:#93c5fd;font-size:.85rem;">Current Set Volume</div><div style="font-size:1.8rem;font-weight:900;color:#22c55e;">{vol:,} lbs</div></div>', unsafe_allow_html=True)
 
-    complete = st.button('✅ COMPLETE SET', key=f'{key_prefix}_complete_{idx}', width='stretch', disabled=bool(disable_actions))
+    complete = st.button('Complete Set', key=f'{key_prefix}_complete_{idx}', width='stretch', disabled=bool(disable_actions), type='primary')
 
     nav1, nav2, nav3, nav4 = st.columns(4)
     with nav1:
-        prev_clicked = st.button('← Previous', key=f'{key_prefix}_prev_{idx}', disabled=(idx <= 0), width='stretch')
+        prev_clicked = st.button('Previous', key=f'{key_prefix}_prev_{idx}', disabled=(idx <= 0), width='stretch')
     with nav2:
-        next_clicked = st.button('➡ NEXT EXERCISE', key=f'{key_prefix}_next_{idx}', disabled=(idx >= total - 1), width='stretch')
+        next_clicked = st.button('Next Exercise', key=f'{key_prefix}_next_{idx}', disabled=(idx >= total - 1), width='stretch')
     with nav3:
         st.caption(f'Exercise {idx + 1} of {total}')
     with nav4:
-        finish_clicked = st.button('🏁 Finish', key=f'{key_prefix}_finish_{idx}', width='stretch', disabled=bool(disable_actions))
+        finish_clicked = st.button('Finish Workout', key=f'{key_prefix}_finish_{idx}', width='stretch', disabled=bool(disable_actions))
 
     st.markdown(f'**Progress:** {completed_today} sets logged • {total_volume_today:,} lbs')
     progress_pct = 0
