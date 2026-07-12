@@ -1,6 +1,6 @@
-APP_VERSION = "X 11.1"
+APP_VERSION = "X 12.0"
 APP_NAME = "Brian Fit"
-BUILD_LABEL = "X.41 Premium AI Coach Experience"
+BUILD_LABEL = "X.50 Premium Production Edition"
 
 DISPLAY_NAME = f"{APP_NAME} {APP_VERSION}"
 DISPLAY_KICKER = f"{DISPLAY_NAME} • {BUILD_LABEL}"

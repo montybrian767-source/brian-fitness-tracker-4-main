@@ -3161,7 +3161,7 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 @media(max-width: 850px){.x-hero{padding:28px 22px}.x-title{font-size:2.2rem}.x-recovery{position:relative; right:auto; top:auto; text-align:left; margin-top:24px}.x-recovery .big{font-size:3rem}.x-mission{grid-template-columns:1fr}.x-ai{grid-template-columns:1fr}.x-ai-mini{border-left:none; padding-left:0; border-top:1px solid rgba(255,255,255,.12); padding-top:14px}}
 
 
-/* Sprint X.5 Smart Workout Experience */
+/* Premium Smart Workout Experience */
 .smart-shell{background:linear-gradient(135deg,#08111F,#0B1B35);border:1px solid rgba(96,165,250,.45);border-radius:28px;padding:28px;margin:18px 0 24px;box-shadow:0 24px 70px rgba(0,0,0,.45)}
 .smart-top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;flex-wrap:wrap}.smart-kicker{letter-spacing:.25em;color:#22C55E;font-size:.78rem;font-weight:950;text-transform:uppercase}.smart-title{font-size:2.7rem;font-weight:950;color:#fff;margin:10px 0 8px}.smart-sub{color:#BFD7FF;font-size:1rem}.smart-score{font-size:3.2rem;font-weight:950;color:#22C55E;text-align:right}.smart-score-label{color:#fff;font-weight:900;letter-spacing:.16em;text-align:right}.smart-card{background:linear-gradient(145deg,#0F1F34,#0A1728);border:1px solid rgba(96,165,250,.32);border-radius:24px;padding:22px;margin:16px 0;box-shadow:0 16px 45px rgba(0,0,0,.32)}
 .smart-photo-box{background:#081322;border:1px solid #1d3655;border-radius:22px;padding:10px;display:flex;align-items:center;justify-content:center;min-height:330px}.smart-photo{width:100%;height:330px;object-fit:contain;border-radius:16px;background:#06111f}.smart-exercise-title{font-size:2rem;color:white;font-weight:950;margin-bottom:8px}.smart-chip{display:inline-block;background:#0B2B4F;border:1px solid #60A5FA;color:#C8DDFF;border-radius:999px;padding:8px 12px;font-weight:900;font-size:.82rem;margin-right:8px;margin-bottom:8px}.smart-chip.green{background:rgba(34,197,94,.13);border-color:#22C55E;color:#B7FFCE}.smart-chip.purple{background:rgba(139,92,246,.16);border-color:#8B5CF6;color:#DDD6FE}.smart-control{background:#0B1E33;border:1px solid #254264;border-radius:18px;padding:16px}.smart-big-value{font-size:2rem;font-weight:950;color:white}.smart-complete{background:linear-gradient(135deg,#22C55E,#16A34A);border-radius:20px;padding:18px;text-align:center;color:white;font-size:1.2rem;font-weight:950;margin-top:14px;box-shadow:0 15px 40px rgba(34,197,94,.35)}
@@ -3202,7 +3202,7 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 
 
 
-/* Sprint X.6 Elite Workout Experience */
+/* Premium Workout Experience */
 .x6-hero{background:linear-gradient(135deg,#07111f,#0b2a4d 55%,#12375f);border:1px solid rgba(96,165,250,.42);border-radius:28px;padding:28px;margin:18px 0 22px 0;box-shadow:0 22px 60px rgba(0,0,0,.45)}
 .x6-kicker{font-size:.78rem;letter-spacing:.22em;text-transform:uppercase;color:#22c55e;font-weight:950}.x6-title{font-size:2.8rem;line-height:1.02;color:#fff;font-weight:950;margin:.35rem 0}.x6-sub{color:#b8c2d1;font-size:1rem}.x6-card{background:linear-gradient(180deg,#111827,#0f1f34);border:1px solid rgba(148,163,184,.16);border-radius:26px;padding:22px;box-shadow:0 18px 46px rgba(0,0,0,.38);margin-bottom:18px}.x6-photo-wrap{height:420px;background:radial-gradient(circle at center,#172554,#07111f);border:1px solid rgba(96,165,250,.25);border-radius:24px;display:flex;align-items:center;justify-content:center;overflow:hidden}.x6-photo-wrap img{width:100%;height:100%;object-fit:contain;padding:16px}.x6-ex-name{font-size:2.15rem;color:#fff;font-weight:950;line-height:1.08}.x6-pill{display:inline-block;margin:8px 8px 0 0;padding:9px 13px;border-radius:999px;background:rgba(37,99,235,.18);border:1px solid rgba(96,165,250,.35);color:#dbeafe;font-weight:900}.x6-pill.green{background:rgba(34,197,94,.18);border-color:rgba(34,197,94,.42);color:#dcfce7}.x6-pill.purple{background:rgba(139,92,246,.18);border-color:rgba(139,92,246,.42);color:#ede9fe}.x6-progress{height:16px;background:#0b1729;border:1px solid #24334a;border-radius:999px;overflow:hidden;margin:14px 0}.x6-progress-fill{height:100%;background:linear-gradient(90deg,#2563eb,#22c55e);border-radius:999px}.x6-big-metric{font-size:3rem;color:#fff;font-weight:950;line-height:1}.x6-label{color:#93a4bd;font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;font-weight:950}.x6-coach{background:linear-gradient(135deg,rgba(139,92,246,.26),rgba(15,31,52,.98));border:1px solid rgba(139,92,246,.55);border-radius:24px;padding:20px;color:white;box-shadow:0 14px 40px rgba(0,0,0,.32)}.x6-timer{background:linear-gradient(135deg,rgba(34,197,94,.24),rgba(15,31,52,.98));border:1px solid rgba(34,197,94,.50);border-radius:24px;padding:22px;text-align:center;margin-top:12px}.x6-timer-num{font-size:3.8rem;color:#fff;font-weight:950;line-height:1}.x6-mini{background:#0b1729;border:1px solid #24334a;border-radius:18px;padding:16px}.x6-list-item{background:#0f1f34;border:1px solid #24334a;border-radius:18px;padding:12px 14px;margin:8px 0;color:#fff}.x6-complete button{background:linear-gradient(135deg,#16a34a,#22c55e)!important;color:white!important;border:none!important;min-height:64px!important;border-radius:20px!important;font-size:1.18rem!important;font-weight:950!important;box-shadow:0 14px 35px rgba(34,197,94,.35)!important}.x6-finish button{background:linear-gradient(135deg,#f59e0b,#f97316)!important;color:white!important;border:none!important;min-height:56px!important;border-radius:18px!important;font-weight:950!important}.x6-nav button{min-height:52px!important;border-radius:16px!important;font-weight:900!important}@media(max-width:900px){.x6-photo-wrap{height:300px}.x6-title{font-size:2rem}.x6-ex-name{font-size:1.55rem}.x6-big-metric{font-size:2.3rem}}
 
@@ -3217,7 +3217,7 @@ st.sidebar.markdown(f"## 🏋️ {DISPLAY_NAME}")
 st.sidebar.caption(BUILD_LABEL)
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
 
-with st.sidebar.expander('Developer Navigation', expanded=False):
+with st.sidebar.expander('Advanced Navigation', expanded=False):
     dev_target = st.selectbox('Open internal route', nav_options, index=0, key='dev_route_target')
     if st.button('Open Route', width='stretch', key='dev_open_route'):
         set_active_route(dev_target)
@@ -4116,13 +4116,13 @@ elif page == "Today's Workout":
     progress_pct = 0 if target_sets_today == 0 else min(100, int((completed_today / max(1, target_sets_today)) * 100))
 
     st.markdown(f"""
-    <div class="x6-hero">
-            <div class="x6-kicker">{DISPLAY_KICKER} • Sprint X.6 Elite Workout Experience</div>
-      <div class="x6-title">{day} — {group}</div>
-      <div class="x6-sub">One-exercise command center with large visuals, set logging, rest timing, progress, and workout finish summary.</div>
-      <div class="x6-progress"><div class="x6-progress-fill" style="width:{progress_pct}%;"></div></div>
-      <div class="x6-sub">Progress {progress_pct}% • {completed_today}/{target_sets_today} sets complete • {total_volume_today:,} lbs today</div>
-    </div>
+        <div class="x6-hero">
+            <div class="x6-kicker">{DISPLAY_KICKER} • Premium Workout Experience</div>
+            <div class="x6-title">{day} — {group}</div>
+            <div class="x6-sub">Simple execution flow: current exercise, target, actual set log, rest timer, coach guidance, and next exercise.</div>
+            <div class="x6-progress"><div class="x6-progress-fill" style="width:{progress_pct}%;"></div></div>
+            <div class="x6-sub">Progress {progress_pct}% • {completed_today}/{target_sets_today} sets complete • {total_volume_today:,} lbs today</div>
+        </div>
     """, unsafe_allow_html=True)
 
     workout_type = render_workout_type_selector(flow_key, label='Workout Category')
@@ -5304,21 +5304,31 @@ elif page == 'System Center':
     import_summary = import_summary if isinstance(import_summary, dict) else {}
     last_save = get_last_save_result() if callable(get_last_save_result) else {}
     last_save = last_save if isinstance(last_save, dict) else {}
+    perf_snapshot = dict(st.session_state.get('perf_last_page', {}))
+    render_ms = float(perf_snapshot.get('render_ms', 0.0) or 0.0)
+    apple_status = 'Connected' if _to_text(import_summary.get('last_import_at', ''), '').strip() not in {'', '-'} else 'Not available'
+    release_health = 'Ready' if db_ok else 'Needs Attention'
     status_payload = {
+        'version': DISPLAY_NAME,
         'supabase': 'Connected' if db_ok else f"Unavailable ({_to_text(db_msg, 'unknown')})",
+        'apple': apple_status,
         'recovery_engine': 'Available',
         'ai_coach': 'Available',
+        'performance': f"Warm ({render_ms:.0f} ms)" if render_ms > 0 else 'Warm',
+        'cache': str(st.session_state.get('perf_render_state', 'warm')).title(),
+        'release_health': release_health,
+        'active_route': str(st.session_state.get('active_route', page)),
         'last_workout_save': _to_text(last_save.get('saved_at', '-'), '-'),
         'last_cardio_save': _to_text(last_save.get('cardio_saved_at', '-'), '-'),
         'last_apple_import': _to_text(import_summary.get('last_import_at', '-'), '-'),
         'flags': all_flags(),
-        'build': DISPLAY_KICKER,
+        'build': BUILD_LABEL,
     }
     render_system_center(status_payload)
 
 
 elif page == "System Check":
-    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">System Check + Backup</div><div class="sub">Daily-use stability tools: validate workouts, images, files, and backups.</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">System Check + Backup</div><div class="sub">Production stability checks for workouts, images, files, and backups.</div></div>', unsafe_allow_html=True)
     issues=[]
     st.markdown("## Required Files")
     required_files=[WORKOUTS, LOG, MAP, NUTRITION, BODY, SUPPLEMENTS]
@@ -5372,7 +5382,7 @@ elif page == "System Check":
     if not issues:
         st.success("System status: ready for daily use.")
     else:
-        st.error("System status: review issues above before adding more features.")
+        st.error("System status: resolve the items above before release.")
 
 
 elif page == "Nutrition":

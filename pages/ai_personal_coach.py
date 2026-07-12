@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 
+from config.version import DISPLAY_KICKER
 from engines.coaching_memory_engine import build_coaching_memory
 from engines.performance_intelligence import build_pr_summary, workout_streak_days
 
@@ -401,7 +402,7 @@ def render_ai_personal_coach(payload: Dict[str, Any]) -> str:
     st.markdown(
         f"""
         <div class='x111-hero'>
-          <div class='x111-kicker'>Brian Fit X 11.1 • Premium AI Coach Experience</div>
+          <div class='x111-kicker'>{DISPLAY_KICKER}</div>
           <div class='x111-title'>GOOD MORNING, BRIAN</div>
           <div class='x111-sub'>{quote}</div>
           <div class='x111-grid'>

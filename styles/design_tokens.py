@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class DesignTokens:
     page_max_width: int = 1400
+    page_gutter: str = "14px"
     space_xs: str = "6px"
     space_sm: str = "10px"
     space_md: str = "14px"
@@ -23,6 +24,19 @@ class DesignTokens:
     shadow_card: str = "0 16px 44px rgba(0, 0, 0, 0.32)"
 
     button_height: str = "46px"
+    button_gap: str = "10px"
+
+    font_body: str = '"Manrope", "Segoe UI", sans-serif'
+    font_heading: str = '"Sora", "Manrope", sans-serif'
+    font_size_body: str = "0.98rem"
+    font_size_caption: str = "0.82rem"
+    font_size_h1: str = "2.1rem"
+    font_size_h2: str = "1.45rem"
+    font_size_h3: str = "1.1rem"
+
+    motion_fast: str = "0.16s"
+    motion_normal: str = "0.24s"
+    motion_curve: str = "cubic-bezier(0.2, 0.8, 0.2, 1)"
 
     text_body: str = "#E5EEF9"
     text_muted: str = "#AFC4DB"
