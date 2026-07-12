@@ -4,8 +4,8 @@ from config.version import APP_VERSION, BUILD_LABEL, DISPLAY_KICKER, DISPLAY_NAM
 
 
 def test_version_constants_are_release_aligned():
-    assert APP_VERSION == "8.1"
-    assert "X.21" in BUILD_LABEL
+    assert APP_VERSION == "X 10.1"
+    assert "X.31" in BUILD_LABEL
     assert DISPLAY_NAME in DISPLAY_KICKER
 
 

@@ -7,3 +7,5 @@ date,workout_date,day,exercise,set_number,weight_lbs,reps,rpe,pain,body_feedback
 2026-07-09,,Thursday,Leg Curl,1,100.0,10,8.0,0,0,Data Manager validation test,Data Manager validation test,1000.0,
 2026-07-09,,Thursday,Leg Curl,1,100.0,10,8.0,0,0,Data Manager validation test,Data Manager validation test,1000.0,
 2026-07-10,2026-07-10,Friday,Chest Press Machine,1,115.0,12,7.0,0,0,VALIDATION_TEST_STRENGTH_UI_20260710_2322,VALIDATION_TEST_STRENGTH_UI_20260710_2322,1380.0,ws_20260710_232007465989
+2026-07-11,2026-07-11,Saturday,Wide Grip Lat Pulldown,1,105.0,12,7.0,0,0,,,1260.0,ws_20260711_202155080917
+2026-07-11,2026-07-11,Saturday,Wide Grip Lat Pulldown,1,105.0,12,7.0,0,0,,,1260.0,ws_20260711_214241891432

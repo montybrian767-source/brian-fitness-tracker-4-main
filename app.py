@@ -8,6 +8,9 @@ import streamlit as st
 import textwrap
 
 from config.version import APP_NAME, APP_VERSION, BUILD_LABEL, DISPLAY_KICKER, DISPLAY_NAME
+from core.cache_manager import publish_event, register_cache_invalidation
+from core.feature_flags import all_flags, is_enabled
+from core.routing import default_home_route
 
 from components.ai_card import ai_card
 from components.executive_header import executive_header
@@ -23,6 +26,9 @@ from engines.exercise_intelligence import ExerciseIntelligence
 from engines.body_intelligence import BodyIntelligence
 from engines.adaptive_ai_coach_engine import build_daily_coaching_plan
 from engines.ai_coach_engine import build_daily_brief
+from engines.coaching_memory_engine import build_coaching_memory
+from engines.daily_command_engine import build_daily_command
+from engines.nutrition_intelligence_engine import build_nutrition_intelligence
 from engines.progressive_overload_engine import analyze_progressive_overload
 from engines.workout_recommendation_engine import generate_next_workout
 from engines.plateau_detection_engine import detect_plateaus
@@ -42,6 +48,7 @@ from services.supabase_service import (
     health_check,
 )
 from utils.datetime_utils import to_utc_series
+from utils.ui_utils import safe_key
 from utils.performance_utils import (
     clear_render_metrics,
     get_render_metrics,
@@ -76,8 +83,10 @@ from engines.performance_intelligence import (
     workout_streak_days,
 )
 from pages.body_stats import render_body_stats_page
+from pages.command_center import render_command_center
 from pages.recovery_center import render_recovery_center
 from pages.smart_scale_import import render_smart_scale_import_page
+from pages.system_center import render_system_center
 
 APP_DIR = Path(__file__).parent
 DATA = APP_DIR / "data"
@@ -175,6 +184,246 @@ CARDIO_HISTORY_FILTERS = [
     'All', 'Strength', 'Cardio', 'Sport', 'Mixed',
     'Pickleball', 'Walking', 'Running', 'Cycling', 'Swimming', 'Elliptical', 'Stair Stepper', 'Rowing'
 ]
+
+SWAP_REASON_OPTIONS = [
+    'Machine occupied',
+    'Equipment unavailable',
+    'Prefer another exercise',
+    'Discomfort',
+    'Other',
+]
+
+SWAP_EQUIPMENT_FILTERS = [
+    'Show all',
+    'Machines only',
+    'Cables only',
+    'Dumbbells only',
+    'Bodyweight',
+]
+
+
+def _primary_muscle_from_text(value: str) -> str:
+    text = _to_text(value, '').strip()
+    if not text:
+        return 'General'
+    primary = text.split('+')[0].split('/')[0].strip()
+    return primary or 'General'
+
+
+def _movement_pattern_guess(exercise_name: str, primary_muscle: str, profile: Dict[str, Any]) -> str:
+    raw = _to_text(profile.get('movement_pattern', ''), '').strip().lower()
+    explicit_map = {
+        'horizontal pull': 'horizontal_pull',
+        'vertical pull': 'vertical_pull',
+        'horizontal push': 'horizontal_push',
+        'vertical push': 'vertical_push',
+    }
+    if raw in explicit_map:
+        return explicit_map[raw]
+
+    name = _to_text(exercise_name, '').lower()
+    primary = _to_text(primary_muscle, '').lower()
+    if any(k in name for k in ['lat pulldown', 'pull-up', 'chin-up', 'pulldown']):
+        return 'vertical_pull'
+    if 'row' in name:
+        return 'horizontal_pull'
+    if any(k in name for k in ['shoulder press', 'overhead press']):
+        return 'vertical_push'
+    if any(k in name for k in ['bench', 'chest press', 'push-up', 'fly']):
+        return 'horizontal_push'
+    if any(k in name for k in ['squat', 'lunge', 'leg press', 'leg extension']):
+        return 'knee_dominant'
+    if any(k in name for k in ['deadlift', 'rdl', 'good morning', 'hip thrust', 'bridge']):
+        return 'hip_hinge'
+    if any(k in name for k in ['leg curl', 'hamstring curl']):
+        return 'knee_flexion'
+    if 'abduction' in name:
+        return 'hip_abduction'
+    if 'adduction' in name:
+        return 'hip_adduction'
+    if any(k in name for k in ['tricep', 'pushdown', 'extension']):
+        return 'elbow_extension'
+    if 'curl' in name:
+        return 'elbow_flexion'
+    if 'calf' in name:
+        return 'calf_raise'
+    if any(k in name for k in ['plank', 'stability']):
+        return 'core_stability'
+    if any(k in name for k in ['crunch', 'twist', 'sit-up']):
+        return 'core_flexion'
+    if 'back' in primary or 'lat' in primary or 'bicep' in primary:
+        return 'horizontal_pull'
+    if 'chest' in primary or 'tricep' in primary:
+        return 'horizontal_push'
+    if 'shoulder' in primary:
+        return 'vertical_push'
+    return 'general'
+
+
+def _equipment_kind(value: str) -> str:
+    text = _to_text(value, '').lower()
+    if 'cable' in text:
+        return 'cable'
+    if 'dumbbell' in text:
+        return 'dumbbell'
+    if 'bodyweight' in text:
+        return 'bodyweight'
+    if 'barbell' in text:
+        return 'barbell'
+    if 'machine' in text or 'gym equipment' in text:
+        return 'machine'
+    return 'general'
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_exercise_library() -> pd.DataFrame:
+    path = DATA / 'exercise_database.csv'
+    if not path.exists():
+        return pd.DataFrame(columns=['exercise', 'muscle_group', 'equipment', 'image_file'])
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=['exercise', 'muscle_group', 'equipment', 'image_file'])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_image_map_lookup() -> Dict[str, str]:
+    if not MAP.exists():
+        return {}
+    try:
+        df = pd.read_csv(MAP)
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    out: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        name = _to_text(row.get('exercise', '')).strip().lower()
+        image_file = _to_text(row.get('image_file', '')).strip()
+        if name and image_file:
+            out[name] = image_file
+    return out
+
+
+def _exercise_previous_performance(log_df: pd.DataFrame, exercise_name: str) -> Dict[str, Any]:
+    if log_df is None or log_df.empty or 'exercise' not in log_df.columns:
+        return {'last': None, 'pr': None, 'last_weight': 0.0}
+    rows = log_df[log_df['exercise'].astype(str).str.strip().str.lower() == _to_text(exercise_name, '').strip().lower()].copy()
+    if rows.empty:
+        return {'last': None, 'pr': None, 'last_weight': 0.0}
+    rows['weight_lbs'] = pd.to_numeric(rows.get('weight_lbs', 0), errors='coerce').fillna(0)
+    rows['reps'] = pd.to_numeric(rows.get('reps', 0), errors='coerce').fillna(0)
+    last = rows.iloc[-1]
+    pr = rows.loc[rows['weight_lbs'].idxmax()] if not rows.empty else last
+    return {
+        'last': f"{float(last.get('weight_lbs', 0) or 0):.1f} lb x {int(float(last.get('reps', 0) or 0))}",
+        'pr': f"{float(pr.get('weight_lbs', 0) or 0):.1f} lb",
+        'last_weight': float(last.get('weight_lbs', 0) or 0),
+    }
+
+
+def find_exercise_substitutions(
+    current_exercise: str,
+    exercise_library: pd.DataFrame,
+    equipment_available: Optional[str] = None,
+    limit: int = 5,
+    current_row: Optional[Dict[str, Any]] = None,
+    log_df: Optional[pd.DataFrame] = None,
+) -> List[Dict[str, Any]]:
+    if exercise_library is None or exercise_library.empty:
+        return []
+
+    current_profile = cached_exercise_profile(_to_text(current_exercise, ''))
+    current_primary = _primary_muscle_from_text(_to_text((current_row or {}).get('muscle_group', ''), _to_text(current_profile.get('primary', ''), 'General')))
+    current_pattern = _movement_pattern_guess(_to_text(current_exercise, ''), current_primary, current_profile)
+
+    kind_filter = _to_text(equipment_available, 'Show all').lower()
+    allowed_kind = {
+        'machines only': 'machine',
+        'cables only': 'cable',
+        'dumbbells only': 'dumbbell',
+        'bodyweight': 'bodyweight',
+    }.get(kind_filter)
+
+    scored: List[Dict[str, Any]] = []
+    for _, row in exercise_library.iterrows():
+        candidate = _to_text(row.get('exercise', '')).strip()
+        if not candidate or candidate.lower() == _to_text(current_exercise, '').strip().lower():
+            continue
+
+        profile = cached_exercise_profile(candidate)
+        primary = _primary_muscle_from_text(_to_text(row.get('muscle_group', ''), _to_text(profile.get('primary', ''), 'General')))
+        pattern = _movement_pattern_guess(candidate, primary, profile)
+        equipment = _to_text(row.get('equipment', _to_text(profile.get('equipment', 'Machine'))), 'Machine')
+        equipment_kind = _equipment_kind(equipment)
+
+        if allowed_kind and equipment_kind != allowed_kind:
+            continue
+
+        # Keep substitutions anchored to same muscle or movement pattern.
+        if primary.lower() != current_primary.lower() and pattern != current_pattern:
+            continue
+
+        score = 0.0
+        reasons: List[str] = []
+        if primary.lower() == current_primary.lower():
+            score += 45.0
+            reasons.append('Same primary muscle')
+        if pattern == current_pattern:
+            score += 35.0
+            reasons.append('Same movement pattern')
+        if equipment_kind == _equipment_kind(_to_text((current_row or {}).get('equipment', 'Machine'))):
+            score += 8.0
+        if 'la fitness' in _to_text(load_coach_preferences().get('equipment_access', ''), '').lower() and equipment_kind in {'machine', 'cable', 'dumbbell', 'bodyweight'}:
+            score += 4.0
+
+        perf = _exercise_previous_performance(log_df if isinstance(log_df, pd.DataFrame) else pd.DataFrame(), candidate)
+        if perf.get('last'):
+            score += 3.0
+
+        scored.append(
+            {
+                'exercise': candidate,
+                'primary_muscle': primary,
+                'movement_pattern': pattern,
+                'equipment': equipment,
+                'similarity_score': round(score, 1),
+                'reason': ', '.join(reasons[:2]) if reasons else 'Similar training purpose',
+                'previous_performance': perf.get('last'),
+                'previous_pr': perf.get('pr'),
+                'recommended_start_weight': float(perf.get('last_weight', 0) or 0),
+                'image_file': _to_text(row.get('image_file', ''), ''),
+            }
+        )
+
+    scored = sorted(scored, key=lambda item: float(item.get('similarity_score', 0)), reverse=True)
+    return scored[: max(3, int(limit))]
+
+
+def _get_swap_map(flow_key: str) -> Dict[str, Dict[str, Any]]:
+    key = f'{flow_key}_swap_map'
+    value = st.session_state.get(key, {})
+    if not isinstance(value, dict):
+        st.session_state[key] = {}
+    return st.session_state.get(key, {})
+
+
+def _apply_swaps_to_active(active: pd.DataFrame, flow_key: str) -> pd.DataFrame:
+    if active is None or active.empty:
+        return active
+    out = active.copy().reset_index(drop=True)
+    swap_map = _get_swap_map(flow_key)
+    for pos_key, swap_row in swap_map.items():
+        try:
+            pos = int(pos_key)
+        except Exception:
+            continue
+        if pos < 0 or pos >= len(out) or not isinstance(swap_row, dict):
+            continue
+        for col in ['exercise', 'muscle_group', 'target_sets', 'target_reps', 'base_weight', 'image_file']:
+            if col in out.columns and col in swap_row:
+                out.at[pos, col] = swap_row.get(col)
+    return out
 
 
 def _init_perf_state():
@@ -360,6 +609,22 @@ def clear_runtime_caches():
     clear_local_shared_payloads()
 
 
+register_cache_invalidation(
+    {
+        'strength_workout_saved': [clear_strength_caches, clear_readiness_cache, clear_ai_coach_cache, clear_local_shared_payloads],
+        'cardio_session_saved': [clear_cardio_caches, clear_readiness_cache, clear_ai_coach_cache, clear_local_shared_payloads],
+        'mixed_workout_saved': [clear_strength_caches, clear_cardio_caches, clear_readiness_cache, clear_ai_coach_cache, clear_local_shared_payloads],
+        'apple_import_completed': [clear_apple_caches, clear_readiness_cache, clear_ai_coach_cache, clear_local_shared_payloads],
+        'body_stats_updated': [clear_readiness_cache, clear_ai_coach_cache, clear_local_shared_payloads],
+        'nutrition_updated': [clear_ai_coach_cache, clear_local_shared_payloads],
+        'goals_updated': [clear_ai_coach_cache, clear_local_shared_payloads],
+        'preferences_updated': [clear_ai_coach_cache, clear_local_shared_payloads],
+        'coaching_feedback_saved': [clear_ai_coach_cache, clear_local_shared_payloads],
+        'workout_plan_changed': [clear_strength_caches, clear_ai_coach_cache, clear_local_shared_payloads],
+    }
+)
+
+
 def invalidate_apple_import_caches_if_needed():
     nonce = str(st.session_state.get('apple_health_import_cache_nonce', '') or '')
     if not nonce:
@@ -367,6 +632,7 @@ def invalidate_apple_import_caches_if_needed():
     previous = str(st.session_state.get('apple_health_last_seen_nonce', '') or '')
     if nonce != previous:
         clear_runtime_caches()
+        publish_event('apple_import_completed', {'nonce': nonce})
         st.session_state['apple_health_last_seen_nonce'] = nonce
 
 
@@ -428,6 +694,7 @@ def save_coach_goals(primary_goal: str, secondary_goals: list[str]) -> None:
     )
     clear_ai_coach_cache()
     clear_local_shared_payloads()
+    publish_event('goals_updated', {'primary_goal': _to_text(primary_goal, '')})
 
 
 def load_coach_preferences() -> dict:
@@ -474,6 +741,7 @@ def save_coach_preferences(preferences: dict) -> None:
     )
     clear_ai_coach_cache()
     clear_local_shared_payloads()
+    publish_event('preferences_updated', {'keys': list(preferences.keys()) if isinstance(preferences, dict) else []})
 
 
 def load_coaching_feedback() -> pd.DataFrame:
@@ -491,6 +759,7 @@ def save_coaching_feedback_row(payload: dict) -> None:
     append_csv(COACHING_FEEDBACK, payload, COACHING_FEEDBACK_COLUMNS)
     clear_ai_coach_cache()
     clear_local_shared_payloads()
+    publish_event('coaching_feedback_saved', {'workout_session_id': _to_text(payload.get('workout_session_id', ''))})
 
 
 @st.cache_data(
@@ -1170,8 +1439,119 @@ def compute_shared_adaptive_plan(log_df: pd.DataFrame, workouts_df: pd.DataFrame
     return payload
 
 
+def _daily_command_signature(
+    target: date,
+    readiness_sig: str,
+    adaptive_sig: str,
+    log_df: pd.DataFrame,
+    cardio_df: pd.DataFrame,
+    body_df: pd.DataFrame,
+    nutrition_df: pd.DataFrame,
+    feedback_df: pd.DataFrame,
+) -> str:
+    return '|'.join(
+        [
+            target.isoformat(),
+            readiness_sig,
+            adaptive_sig,
+            str(len(log_df.index) if isinstance(log_df, pd.DataFrame) else 0),
+            str(len(cardio_df.index) if isinstance(cardio_df, pd.DataFrame) else 0),
+            str(len(body_df.index) if isinstance(body_df, pd.DataFrame) else 0),
+            str(len(nutrition_df.index) if isinstance(nutrition_df, pd.DataFrame) else 0),
+            str(len(feedback_df.index) if isinstance(feedback_df, pd.DataFrame) else 0),
+        ]
+    )
+
+
+def _latest_record(df: pd.DataFrame, date_col: str) -> dict:
+    if not isinstance(df, pd.DataFrame) or df.empty or date_col not in df.columns:
+        return {}
+    temp = df.copy()
+    temp[date_col] = pd.to_datetime(temp[date_col], errors='coerce', utc=True)
+    temp = temp.dropna(subset=[date_col]).sort_values(date_col)
+    if temp.empty:
+        return {}
+    return temp.iloc[-1].to_dict()
+
+
+def compute_shared_daily_command(log_df: pd.DataFrame, workouts_df: pd.DataFrame, target_dt: Optional[date] = None) -> dict:
+    target = target_dt or date.today()
+    readiness_payload = compute_shared_readiness(log_df, target)
+    adaptive_payload = compute_shared_adaptive_plan(log_df, workouts_df, target)
+    readiness_result = readiness_payload.get('result', {}) if isinstance(readiness_payload, dict) else {}
+    adaptive_plan = adaptive_payload.get('plan', {}) if isinstance(adaptive_payload, dict) else {}
+
+    cardio_df = load_cardio_log(days=90)
+    apple_daily_df, _ = cached_get_apple_activity_daily(days=90)
+    body_df = read_csv_safe(BODY, BODY_COLUMNS)
+    nutrition_df = read_csv_safe(NUTRITION, ['date', 'meal', 'calories', 'protein_g', 'carbs_g', 'fat_g', 'water_oz', 'notes'])
+    supplement_df = read_csv_safe(SUPPLEMENTS, ['date', 'creatine', 'protein_powder', 'multivitamin', 'fish_oil', 'pre_workout', 'magnesium', 'vitamin_d', 'electrolytes', 'notes'])
+    feedback_df = load_coaching_feedback()
+    goals_payload = load_coach_goals()
+    preferences_payload = load_coach_preferences()
+
+    readiness_sig = str(readiness_payload.get('signature', ''))
+    adaptive_sig = str(adaptive_payload.get('signature', ''))
+    signature = _daily_command_signature(target, readiness_sig, adaptive_sig, log_df, cardio_df, body_df, nutrition_df, feedback_df)
+    cache_key = f'daily_command_{signature}'
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    generated_workout = generate_next_workout(log_df, workouts_df)
+
+    strength_summary = {
+        'days_trained_7': int(pd.to_datetime(log_df.get('date', pd.Series(dtype='datetime64[ns]')), errors='coerce').dropna().dt.date.nunique()) if isinstance(log_df, pd.DataFrame) and not log_df.empty and 'date' in log_df.columns else 0,
+    }
+    cardio_summary = {
+        'weekly_minutes': float(pd.to_numeric(cardio_df.get('duration_minutes', 0), errors='coerce').fillna(0).sum()) if isinstance(cardio_df, pd.DataFrame) and not cardio_df.empty else 0.0,
+        'weekly_sessions': int(len(cardio_df.index)) if isinstance(cardio_df, pd.DataFrame) else 0,
+    }
+
+    latest_apple = _latest_record(apple_daily_df, 'activity_date') if isinstance(apple_daily_df, pd.DataFrame) else {}
+    apple_missing = []
+    for col in ['steps', 'active_energy_kcal', 'exercise_minutes', 'sleep_hours', 'resting_heart_rate', 'heart_rate_variability_ms']:
+        if col not in latest_apple or pd.isna(latest_apple.get(col)):
+            apple_missing.append(col)
+    apple_summary = dict(latest_apple)
+    apple_summary['missing_data'] = apple_missing
+
+    latest_body = _latest_record(body_df, 'date')
+    body_summary = {
+        'weight_lbs': latest_body.get('body_weight_lbs'),
+        'body_fat_pct': latest_body.get('body_fat_pct'),
+        'weight_trend': 'Stable' if latest_body else 'No data',
+    }
+
+    nutrition_summary = build_nutrition_intelligence(nutrition_df, supplement_df, goals_payload)
+    coaching_memory = build_coaching_memory(feedback_df, log_df, cardio_df)
+
+    payload = {
+        'target_date': target.isoformat(),
+        'signature': signature,
+        'daily_command': build_daily_command(
+            target_date=target.isoformat(),
+            readiness_result=readiness_result,
+            coaching_plan=adaptive_plan,
+            generated_workout=generated_workout,
+            strength_summary=strength_summary,
+            cardio_summary=cardio_summary,
+            apple_summary=apple_summary,
+            body_summary=body_summary,
+            nutrition_summary=nutrition_summary,
+            coaching_memory=coaching_memory,
+            user_goals=goals_payload,
+            user_preferences=preferences_payload,
+        ),
+    }
+    st.session_state[cache_key] = payload
+    st.session_state['shared_daily_command_payload'] = payload
+    return payload
+
+
 def get_mobile_primary_page() -> str:
     mapping = {
+        'Command Center': 'Command Center',
         'Dashboard': 'Dashboard',
         'AI Personal Trainer': 'AI Personal Trainer',
         'Workout': "Today's Workout",
@@ -1188,31 +1568,35 @@ def get_mobile_primary_page() -> str:
         st.session_state['mobile_more_active'] = False
 
     forced_mobile_target = st.session_state.get('mobile_nav_override')
-    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']:
+    if forced_mobile_target in ['Command Center', 'Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']:
         st.session_state['mobile_primary_nav'] = forced_mobile_target
 
-    current = str(st.session_state.get('active_route', st.session_state.get('main_nav', 'Dashboard')))
+    default_route = default_home_route()
+    current = str(st.session_state.get('active_route', st.session_state.get('main_nav', default_route)))
     reverse = {
+        'Command Center': 'Command Center',
         "Today's Workout": 'Workout',
         'Quick Log': 'Quick Log',
         'Progress Analytics': 'Progress',
         'Apple Activity': 'More',
         'Recovery & Readiness': 'More',
     }
-    current_mobile = reverse.get(current, current if current in mapping else 'Dashboard')
+    current_mobile = reverse.get(current, current if current in mapping else default_route)
+
+    nav_choices = ['Command Center', 'Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More']
 
     st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
     selected = st.radio(
         'Mobile Primary Navigation',
-        ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'],
+        nav_choices,
         horizontal=True,
         key='mobile_primary_nav',
-        index=['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'].index(current_mobile) if current_mobile in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'] else 0,
+        index=nav_choices.index(current_mobile) if current_mobile in nav_choices else 0,
         label_visibility='collapsed',
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if forced_mobile_target in ['Dashboard', 'AI Personal Trainer', 'Workout', 'Quick Log', 'Gym Mode', 'History', 'Progress', 'More'] and selected != forced_mobile_target:
+    if forced_mobile_target in nav_choices and selected != forced_mobile_target:
         selected = forced_mobile_target
     if 'mobile_nav_override' in st.session_state:
         st.session_state.pop('mobile_nav_override', None)
@@ -1247,7 +1631,7 @@ def get_mobile_primary_page() -> str:
 
 
 def set_active_route(route: str) -> None:
-    target = str(route or 'Dashboard')
+    target = str(route or default_home_route())
     st.session_state['active_route'] = target
     st.session_state['main_nav'] = target
 
@@ -1267,14 +1651,22 @@ def get_rest_timer_state(flow_key: str) -> dict:
 
 def render_rest_timer(flow_key: str):
     state = get_rest_timer_state(flow_key)
+    context = st.session_state.get(f'{flow_key}_rest_context', {})
+    if not isinstance(context, dict):
+        context = {}
+    recommended = int(_to_int(context.get('recommended_rest_seconds', state.get('duration', 90)), 90))
+    target_rpe = _to_text(context.get('target_rpe', '7'))
+    exercise_name = _to_text(context.get('exercise_name', 'Current Exercise'))
+    latest_rpe = _to_float(context.get('last_set_rpe', 0), 0)
     st.markdown('<div class="rest-timer-card">', unsafe_allow_html=True)
-    st.markdown('### Rest Timer')
+    st.markdown('### Recommended Rest')
+    st.caption(f'{exercise_name} • Target RPE {target_rpe}' + (f' • Last set RPE {latest_rpe:.1f}' if latest_rpe else ''))
     quick = st.radio(
         'Quick timer',
         ['60 sec', '90 sec', '120 sec', '180 sec'],
         horizontal=True,
         key=f'{flow_key}_rest_quick',
-        index=[60, 90, 120, 180].index(int(state.get('duration', 90))) if int(state.get('duration', 90)) in [60, 90, 120, 180] else 1,
+        index=[60, 90, 120, 180].index(int(state.get('duration', recommended))) if int(state.get('duration', recommended)) in [60, 90, 120, 180] else 1,
     )
     selected_seconds = int(str(quick).split()[0])
     if selected_seconds != int(state.get('duration', 90)) and not bool(state.get('running', False)):
@@ -1290,24 +1682,36 @@ def render_rest_timer(flow_key: str):
             state['started_at'] = None
 
     st.markdown(f'<div class="rest-countdown">{int(state.get("remaining", 0))}s</div>', unsafe_allow_html=True)
+    st.caption('Ready to Lift' if int(state.get('remaining', 0)) <= 0 else 'Resting based on exercise, RPE, and previous set.')
     if int(state.get('remaining', 0)) == 0:
-        st.success('Rest complete')
+        st.success('Ready to Lift')
 
-    b1, b2, b3, b4 = st.columns(4)
+    a1, a2, a3 = st.columns(3)
+    if a1.button('Skip Rest', key=f'{flow_key}_rest_skip', width='stretch'):
+        state['remaining'] = 0
+        state['running'] = False
+        state['started_at'] = None
+    if a2.button('Need More Time', key=f'{flow_key}_rest_more', width='stretch'):
+        state['duration'] = int(max(selected_seconds, recommended) + 30)
+        state['remaining'] = int(state['duration'])
+        state['running'] = True
+        state['started_at'] = datetime.now()
+    if a3.button('Ready Now', key=f'{flow_key}_rest_ready', width='stretch'):
+        state['remaining'] = 0
+        state['running'] = False
+        state['started_at'] = None
+
+    b1, b2, b3 = st.columns(3)
     if b1.button('Start', key=f'{flow_key}_rest_start', width='stretch'):
-        state['duration'] = int(selected_seconds)
+        state['duration'] = int(max(selected_seconds, recommended))
         state['started_at'] = datetime.now() - pd.to_timedelta(int(state.get('duration', selected_seconds)) - int(state.get('remaining', selected_seconds)), unit='s')
         state['running'] = True
     if b2.button('Pause', key=f'{flow_key}_rest_pause', width='stretch'):
         state['running'] = False
         state['started_at'] = None
     if b3.button('Reset', key=f'{flow_key}_rest_reset', width='stretch'):
-        state['duration'] = int(selected_seconds)
-        state['remaining'] = int(selected_seconds)
-        state['running'] = False
-        state['started_at'] = None
-    if b4.button('Skip', key=f'{flow_key}_rest_skip', width='stretch'):
-        state['remaining'] = 0
+        state['duration'] = int(max(selected_seconds, recommended))
+        state['remaining'] = int(state['duration'])
         state['running'] = False
         state['started_at'] = None
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1844,6 +2248,7 @@ def render_cardio_logger(flow_key: str, session_id: str, mode_label: str = 'Card
             st.success('Cardio session saved.')
             pending = get_pending_cardio(flow_key)
             pending.append(dict(cardio_row))
+            publish_event('cardio_session_saved', {'activity_type': _to_text(cardio_row.get('activity_type', ''))})
             saved = True
         else:
             warning = _to_text(save_result.get('setup_warning', '')).strip()
@@ -2204,6 +2609,79 @@ def build_set_row(day: str, exercise: str, result: dict, session_id: str):
     }
 
 
+def build_execution_feedback(row: pd.Series, result: dict, last_stats: tuple[float, int, float], exercise_data: dict, target_rpe: str, rest_seconds: int) -> dict:
+    target_weight = float(row.get('base_weight', 0) or 0)
+    actual_weight = float(result.get('weight', target_weight) or target_weight)
+    actual_reps = int(float(result.get('reps', 0) or 0))
+    actual_rpe = float(result.get('rpe', 0) or 0)
+    last_weight, last_reps, best_weight = last_stats
+    rep_target_text = str(row.get('target_reps', '8-12'))
+    rep_low = 8
+    rep_high = 12
+    try:
+        rep_text = rep_target_text.replace('reps', '').replace('rep', '').strip()
+        if '-' in rep_text:
+            left, right = rep_text.split('-', 1)
+            rep_low = int(float(left.strip().split()[0]))
+            rep_high = int(float(right.strip().split()[0]))
+        else:
+            rep_low = rep_high = int(float(rep_text.split()[0]))
+    except Exception:
+        rep_low, rep_high = 8, 12
+
+    exceeded_weight = actual_weight > target_weight + 0.1
+    exceeded_reps = rep_high > 0 and actual_reps > rep_high
+    under_target = (rep_low > 0 and actual_reps < rep_low) or actual_rpe >= 9.0
+
+    if exceeded_weight or exceeded_reps:
+        result_label = 'Exceeded Target'
+        suggestion = f'Increase to {actual_weight + 5:.0f} next set.'
+        coach_line = 'Excellent tempo. Increase the next set if form stays clean.'
+        confidence = 92
+    elif under_target:
+        result_label = 'Below Target'
+        suggestion = f'Stay at {actual_weight:.0f} and reduce RPE target or cut one set.'
+        coach_line = 'Hold the load and own the rep quality before progressing.'
+        confidence = 84
+    else:
+        result_label = 'On Target'
+        suggestion = f'Stay at {actual_weight:.0f} for the next set.'
+        coach_line = 'Excellent tempo and control. Keep the current load.'
+        confidence = 90
+
+    comparison = f'Target {target_weight:.0f} x {rep_target_text} | Actual {actual_weight:.0f} x {actual_reps}'
+    learning_observation = {
+        'memory_type': 'performance_pattern',
+        'memory_key': f"{_to_text(row.get('exercise', ''), '').lower()}_{_to_text(row.get('day', ''), '').lower()}",
+        'summary': f"Set logged at {actual_weight:.0f} lbs for {actual_reps} reps with RPE {actual_rpe:.1f}.",
+        'confidence': round(confidence / 100.0, 2),
+        'metadata': {
+            'accepted_weight_change': bool(exceeded_weight),
+            'rejected_weight_change': bool(under_target),
+            'actual_rpe': actual_rpe,
+            'skipped_rest': False,
+        },
+    }
+
+    return {
+        'comparison': comparison,
+        'result_label': result_label,
+        'suggestion': suggestion,
+        'coach_line': coach_line,
+        'confidence': confidence,
+        'target_weight': target_weight,
+        'actual_weight': actual_weight,
+        'actual_reps': actual_reps,
+        'actual_rpe': actual_rpe,
+        'previous_workout': f'{last_weight:.0f} x {last_reps}',
+        'current_pr': f'{best_weight:.0f} x {max(last_reps, actual_reps)}',
+        'coach_recommendation': f'{actual_weight:.0f} x {rep_target_text} today',
+        'learning_observation': learning_observation,
+        'rest_seconds': rest_seconds,
+        'movement_pattern': _to_text(exercise_data.get('movement_pattern', 'Unknown'), 'Unknown') if isinstance(exercise_data, dict) else 'Unknown',
+    }
+
+
 def save_rows_to_cloud_then_backup(rows, save_source_label='phone_workout'):
     session_id = str(rows[0].get('workout_session_id', '') if rows else '')
     save_result = unified_save_workout_session(
@@ -2263,6 +2741,15 @@ def save_rows_to_cloud_then_backup(rows, save_source_label='phone_workout'):
 
     # Ensure next rerun reflects newest cloud/csv values after any save attempt.
     clear_runtime_caches()
+    if supabase_ok:
+        publish_event(
+            'strength_workout_saved',
+            {
+                'session_id': session_id,
+                'sets_inserted': sets_inserted,
+                'duplicates_skipped': duplicates_skipped,
+            },
+        )
 
     return {
         'supabase_ok': supabase_ok,
@@ -2620,7 +3107,7 @@ div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
 st.markdown(CSS, unsafe_allow_html=True)
 
 # Navigation — desktop sidebar + phone-friendly top menu
-nav_options = ["Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Quick Log","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
+nav_options = ["Command Center","Dashboard","AI Personal Trainer","Today's Workout","Gym Mode","AI Coach","Quick Log","Workout Builder","Weekly Plan","Weekly Coaching Report","System Check","System Center","Nutrition","Supplements","Body Stats","Smart Scale","Recovery & Readiness","Recovery Center","Progress Analytics","Exercise Library","History","Data Manager"]
 st.sidebar.markdown(f"## 🏋️ {DISPLAY_NAME}")
 st.sidebar.caption(BUILD_LABEL)
 st.sidebar.markdown('<div class="safe"><b>✅ Data safe</b><br><br><span class="small">Primary:</span> <b>Supabase</b><br><span class="small">Backup:</span> <b>data/workout_log.csv</b></div>', unsafe_allow_html=True)
@@ -2630,15 +3117,15 @@ set_active_route(page)
 clear_render_metrics()
 
 needs_workouts = page in {
-    'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
+    'Command Center', 'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
     'Quick Log', 'Workout Builder', 'Weekly Plan', 'Weekly Coaching Report', 'Progress Analytics', 'History',
 }
 needs_log = page in {
-    'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
+    'Command Center', 'Dashboard', 'AI Personal Trainer', "Today's Workout", 'Gym Mode', 'AI Coach',
     'Quick Log', 'Workout Builder', 'Weekly Coaching Report', 'Progress Analytics', 'History', 'Recovery & Readiness',
 }
-needs_readiness = page in {'Dashboard', 'AI Personal Trainer', 'Recovery & Readiness'}
-needs_coaching = page in {'Dashboard', 'AI Personal Trainer'}
+needs_readiness = page in {'Command Center', 'Dashboard', 'AI Personal Trainer', 'Recovery & Readiness'}
+needs_coaching = page in {'Command Center', 'Dashboard', 'AI Personal Trainer'}
 
 workouts = pd.DataFrame()
 log = pd.DataFrame()
@@ -2666,7 +3153,34 @@ if needs_coaching:
 
 days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 
-if page == "Dashboard":
+if page == 'Command Center':
+    daily_payload = compute_shared_daily_command(log, workouts)
+    daily_command = daily_payload.get('daily_command', {}) if isinstance(daily_payload, dict) else {}
+    action = render_command_center(daily_command)
+
+    if action == 'start_workout':
+        st.session_state['mobile_nav_override'] = 'Gym Mode'
+        set_active_route('Gym Mode')
+        st.rerun()
+    if action == 'preview_workout':
+        set_active_route('AI Personal Trainer')
+        st.session_state['mobile_nav_override'] = 'AI Personal Trainer'
+        st.session_state['ai80_show_preview'] = True
+        st.rerun()
+    if action == 'adjust_plan':
+        set_active_route('AI Personal Trainer')
+        st.session_state['mobile_nav_override'] = 'AI Personal Trainer'
+        st.rerun()
+    if action == 'recovery_instead':
+        set_active_route('Recovery & Readiness')
+        st.session_state['mobile_nav_override'] = 'More'
+        st.rerun()
+    if action == 'log_activity':
+        set_active_route('Quick Log')
+        st.session_state['mobile_nav_override'] = 'Quick Log'
+        st.rerun()
+
+elif page == "Dashboard":
     today = date.today().strftime('%A')
     today_df = workouts[workouts.day == today]
     focus = " / ".join(today_df['muscle_group'].astype(str).dropna().unique().tolist()) if not today_df.empty else "Recovery / Mobility"
@@ -3459,10 +3973,13 @@ elif page == "Today's Workout":
         if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
             st.session_state[f'{flow_key}_started_at'] = datetime.now()
 
+        active = _apply_swaps_to_active(active, flow_key)
+
         if 'x6_idx' not in st.session_state:
             st.session_state.x6_idx = 0
         st.session_state.x6_idx = max(0, min(int(st.session_state.x6_idx), len(active)-1))
         row = active.iloc[st.session_state.x6_idx]
+        exercise_name = _to_text(row.exercise, '')
         sets = int(row.target_sets) if str(row.target_sets).isdigit() else 3
         target_reps_display = str(row.target_reps)
         try:
@@ -3471,16 +3988,37 @@ elif page == "Today's Workout":
             reps_default = 12
         recent_ex = pd.DataFrame()
         if not log_now.empty and 'exercise' in log_now.columns:
-            recent_ex = log_now[log_now['exercise'].astype(str) == str(row.exercise)].copy()
-        last_weight, last_reps, best_weight = get_recent_exercise_stats(log_now, row.exercise)
+            recent_ex = log_now[log_now['exercise'].astype(str) == exercise_name].copy()
+        last_weight, last_reps, best_weight = get_recent_exercise_stats(log_now, exercise_name)
         if last_weight <= 0:
             last_weight = float(row.base_weight)
         if best_weight <= 0:
             best_weight = float(row.base_weight)
 
+        completed_for_exercise = sum(
+            1
+            for s in pending_sets
+            if _to_text(s.get('exercise', ''), '').strip().lower() == exercise_name.strip().lower()
+        )
+        total_target_sets = int(pd.to_numeric(active.get('target_sets', 0), errors='coerce').fillna(0).sum()) if 'target_sets' in active.columns else 0
+        progress_set_count = 0
+        for item in pending_sets:
+            try:
+                progress_set_count += int(float(item.get('set_number', 0) or 0)) > 0
+            except Exception:
+                pass
+        profile_hint = cached_exercise_profile(exercise_name)
+        target_rpe_hint = _to_text(profile_hint.get('target_rpe', ''), '')
+        rest_hint = _to_text(profile_hint.get('rest_seconds', ''), '')
+        st.session_state[f'{flow_key}_rest_context'] = {
+            'exercise_name': exercise_name,
+            'recommended_rest_seconds': _to_int(rest_hint or 90, 90),
+            'target_rpe': target_rpe_hint or '7',
+            'last_set_rpe': float(recent_ex.iloc[-1].get('rpe', 0) or 0) if not recent_ex.empty and 'rpe' in recent_ex.columns else 0,
+        }
         photo_html = img_tag(image_path(row)).replace('class="exercise-photo"', 'class="x6-photo"')
         # Fetch exercise intelligence
-        exercise_data = cached_exercise_profile(str(row.exercise))
+        exercise_data = profile_hint
         # Use Workout Command Center component to render UI and capture events/values
         result = workout_command_center(
             row=row.to_dict(),
@@ -3493,16 +4031,124 @@ elif page == "Today's Workout":
             sets=sets,
             reps_default=reps_default,
             ai_cue="Control the eccentric. Own every rep.",
-            completed_today=completed_today,
+            completed_today=progress_set_count,
             total_volume_today=total_volume_today,
             day=day,
             exercise_data=exercise_data,
             key_prefix="x6",
         )
+        swap_map = _get_swap_map(flow_key)
+        st.markdown('### Swap Exercise')
+        swap_col1, swap_col2, swap_col3 = st.columns([1.1, 1.0, 0.9])
+        with swap_col1:
+            open_swap = st.button('Swap This Exercise', key=f'{flow_key}_open_swap_{st.session_state.x6_idx}', width='stretch')
+        with swap_col2:
+            st.selectbox(
+                'Equipment filter',
+                SWAP_EQUIPMENT_FILTERS,
+                key=f'{flow_key}_swap_equipment_{st.session_state.x6_idx}',
+                label_visibility='collapsed',
+            )
+        with swap_col3:
+            st.caption('Quick swap keeps workout position and set progress')
+
+        if open_swap:
+            st.session_state[f'{flow_key}_swap_open_idx'] = int(st.session_state.x6_idx)
+
+        candidate_swaps = find_exercise_substitutions(
+            current_exercise=exercise_name,
+            exercise_library=_cached_exercise_library(),
+            equipment_available=st.session_state.get(f'{flow_key}_swap_equipment_{st.session_state.x6_idx}', 'Show all'),
+            limit=5,
+            current_row=row.to_dict(),
+            log_df=log_now,
+        )
+        open_idx = st.session_state.get(f'{flow_key}_swap_open_idx')
+        if open_idx == int(st.session_state.x6_idx):
+            st.markdown('<div style="background:#071524;border:1px solid #2b527a;border-radius:14px;padding:12px;">', unsafe_allow_html=True)
+            swap_reason = st.selectbox('Why are you swapping?', SWAP_REASON_OPTIONS, key=f'{flow_key}_swap_reason_{st.session_state.x6_idx}')
+            if not candidate_swaps:
+                st.info('No strong alternatives found in the current exercise library for this pattern.')
+            for candidate in candidate_swaps:
+                replacement_name = _to_text(candidate.get('exercise', ''), '').strip()
+                if not replacement_name:
+                    st.warning('One replacement option was skipped because it was missing a valid exercise name.')
+                    continue
+
+                swap_key = safe_key(
+                    f"{session_id}_{int(st.session_state.x6_idx)}_{exercise_name}_{replacement_name}",
+                    prefix='swap',
+                )
+                s1, s2, s3 = st.columns([1.6, 1.2, 0.9])
+                with s1:
+                    st.markdown(
+                        f"**{replacement_name}**  \n"
+                        f"{_to_text(candidate.get('reason', 'Similar training purpose'))}"
+                    )
+                    perf_line = _to_text(candidate.get('previous_performance', ''), '').strip()
+                    if perf_line:
+                        st.caption(f"Previous: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
+                    else:
+                        st.caption('No replacement history yet. Select a starting weight around RPE 6-7.')
+                with s2:
+                    st.caption(
+                        f"Primary: {_to_text(candidate.get('primary_muscle', 'General'))}  |  "
+                        f"Equipment: {_to_text(candidate.get('equipment', 'General'))}"
+                    )
+                    st.caption(f"Match score: {float(candidate.get('similarity_score', 0)):.1f}")
+                with s3:
+                    if st.button('Use This Exercise', key=f"{swap_key}_use", width='stretch'):
+                        replacement = replacement_name
+                        image_file = _to_text(candidate.get('image_file', ''), '').strip()
+                        if not image_file:
+                            image_file = _cached_image_map_lookup().get(replacement.lower(), '')
+                        base_weight = float(candidate.get('recommended_start_weight', 0) or 0)
+                        if base_weight <= 0:
+                            base_weight = float(row.get('base_weight', 0) or 0)
+                        swap_row = {
+                            'exercise': replacement,
+                            'muscle_group': _to_text(candidate.get('primary_muscle', row.get('muscle_group', 'General')), 'General'),
+                            'target_sets': int(float(row.get('target_sets', 3) or 3)),
+                            'target_reps': int(float(row.get('target_reps', 10) or 10)),
+                            'base_weight': float(base_weight),
+                            'image_file': image_file,
+                        }
+                        swap_map[str(int(st.session_state.x6_idx))] = swap_row
+                        st.session_state[f'{flow_key}_swap_map'] = swap_map
+                        history = st.session_state.get(f'{flow_key}_swap_history', [])
+                        if not isinstance(history, list):
+                            history = []
+                        history.append(
+                            {
+                                'session_id': session_id,
+                                'position': int(st.session_state.x6_idx) + 1,
+                                'original_exercise': exercise_name,
+                                'replacement_exercise': replacement,
+                                'reason': swap_reason,
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'kept': ['set targets', 'set index', 'session ID'],
+                                'updated': ['exercise name', 'image', 'coaching profile', 'history metrics'],
+                            }
+                        )
+                        st.session_state[f'{flow_key}_swap_history'] = history
+                        for pending in pending_sets:
+                            if int(float(pending.get('workout_position', st.session_state.x6_idx + 1) or 0)) == int(st.session_state.x6_idx + 1):
+                                pending['exercise'] = replacement
+                        st.session_state[f'{flow_key}_swap_open_idx'] = None
+                        st.success(f"Swapped {exercise_name} -> {replacement}. Position and session are preserved.")
+                        st.rerun()
+                    if st.button('View Exercise', key=f"{swap_key}_view", width='stretch'):
+                        st.info(f"Exercise detail: {replacement_name} • {_to_text(candidate.get('equipment', 'General'))}")
+            if st.button('Cancel Swap', key=f'{flow_key}_swap_cancel_{st.session_state.x6_idx}', width='stretch'):
+                st.session_state[f'{flow_key}_swap_open_idx'] = None
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
         # Preserve existing logging behavior: when complete, save log and advance
         if result.get('complete'):
             st.session_state[saving_key] = True
-            set_row = build_set_row(day=day, exercise=row.exercise, result=result, session_id=session_id)
+            set_row = build_set_row(day=day, exercise=exercise_name, result=result, session_id=session_id)
+            set_row['workout_position'] = int(st.session_state.x6_idx) + 1
             single_set_result = save_completed_set(set_row)
             save_result = {
                 'supabase_ok': bool(single_set_result.get('ok')),
@@ -3533,7 +4179,7 @@ elif page == "Today's Workout":
                 'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'status': 'success' if bool(save_result.get('supabase_ok')) else 'error',
                 'error': str(save_result.get('supabase_error', '') or save_result.get('csv_error', '') or ''),
-                'last_saved_exercise': str(row.exercise),
+                'last_saved_exercise': str(exercise_name),
                 'last_save_source': 'supabase' if bool(save_result.get('supabase_ok')) else 'backup_only',
                 'last_workout_session_id': str(save_result.get('session_id', session_id)),
                 'session_id_supported': bool(save_result.get('session_id_supported', False)),
@@ -3562,6 +4208,14 @@ elif page == "Today's Workout":
                 timer_state['running'] = False
                 timer_state['started_at'] = None
                 timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                execution_feedback = build_execution_feedback(row, result, (last_weight, last_reps, best_weight), exercise_data, target_rpe_hint or '7', int(_to_int(rest_hint or 90, 90)))
+                st.session_state[f'{flow_key}_last_execution_feedback'] = execution_feedback
+                if float(execution_feedback.get('confidence', 0) or 0) >= 90:
+                    st.session_state[f'{flow_key}_recent_pr_burst'] = {
+                        'headline': 'New PR detected' if float(result.get('weight', 0) or 0) >= float(best_weight or 0) else 'Strong set logged',
+                        'detail': f"{exercise_name}: {execution_feedback.get('result_label', 'On Target')} • {execution_feedback.get('comparison', '')}",
+                    }
+                st.session_state[f'{flow_key}_learning_observations'] = list(st.session_state.get(f'{flow_key}_learning_observations', [])) + [execution_feedback.get('learning_observation', {})]
                 render_cloud_save_success(save_result)
                 if st.session_state.x6_idx < len(active)-1:
                     st.session_state[saving_key] = False
@@ -3639,7 +4293,20 @@ elif page == "Today's Workout":
                     if save_result.get('supabase_ok'):
                         render_cloud_save_success(save_result)
                         render_session_summary(save_result, session_sets, flow_key=flow_key)
+                        swap_history = st.session_state.get(f'{flow_key}_swap_history', [])
+                        if isinstance(swap_history, list) and swap_history:
+                            st.markdown('### Exercise Swaps During Session')
+                            for swap_event in swap_history:
+                                st.markdown(
+                                    f"- Pos {int(swap_event.get('position', 0))}: "
+                                    f"{_to_text(swap_event.get('original_exercise', ''))} -> "
+                                    f"{_to_text(swap_event.get('replacement_exercise', ''))} "
+                                    f"({_to_text(swap_event.get('reason', ''))}) at {_to_text(swap_event.get('timestamp', ''))}"
+                                )
+                            st.caption('Kept: set targets, position, workout session tracking. Updated: exercise profile, image, history guidance.')
                         clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_swap_map'] = {}
+                        st.session_state[f'{flow_key}_swap_history'] = []
                         st.session_state[f'{flow_key}_started_at'] = None
                     else:
                         render_cloud_save_failure(save_result)
@@ -3722,21 +4389,65 @@ elif page == "Gym Mode":
         if f'{flow_key}_started_at' not in st.session_state or st.session_state.get(f'{flow_key}_started_at') is None:
             st.session_state[f'{flow_key}_started_at'] = datetime.now()
 
+        active = _apply_swaps_to_active(active, flow_key)
         idx = st.number_input("Exercise number", min_value=1, max_value=len(active), value=1, step=1) - 1
         row = active.iloc[int(idx)]
-        st.markdown(f'<div class="exercise-card"><div class="exercise-head"><div class="num">{idx+1}</div><div><div class="ex-title">{row.exercise}</div><span class="badge">Target: {row.target_sets} × {row.target_reps}</span><span class="badge green">{row.muscle_group}</span></div></div>', unsafe_allow_html=True)
+        exercise_name = _to_text(row.exercise, '')
+
+        progress_set_count = 0
+        for item in pending_sets:
+            try:
+                progress_set_count += int(float(item.get('set_number', 0) or 0)) > 0
+            except Exception:
+                pass
+        total_target_sets = int(pd.to_numeric(active.get('target_sets', 0), errors='coerce').fillna(0).sum()) if 'target_sets' in active.columns else 0
+        completed_for_exercise = sum(
+            1
+            for s in pending_sets
+            if _to_text(s.get('exercise', ''), '').strip().lower() == exercise_name.strip().lower()
+        )
+        rest_hint = str(cached_exercise_profile(exercise_name).get('rest_seconds', '') or '')
+        target_rpe_hint = str(cached_exercise_profile(exercise_name).get('target_rpe', '') or '')
+        current_weight_hint = float(row.get('base_weight', 0) or 0)
+        st.markdown(
+            (
+                '<div style="position:sticky;top:114px;z-index:995;background:linear-gradient(145deg,#061123,#0f2742);'
+                'border:1px solid #2f5f8f;border-radius:16px;padding:12px 14px;margin:8px 0 10px 0;box-shadow:0 10px 22px rgba(0,0,0,.28);">'
+                f'<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">'
+                f'<div style="font-size:.78rem;font-weight:900;letter-spacing:.14em;color:#7dd3fc;">CURRENT EXERCISE {int(idx)+1}/{len(active)}</div>'
+                f'<div style="font-size:.72rem;color:#bfdbfe;">Progress: {progress_set_count}/{max(total_target_sets,1)} sets</div></div>'
+                f'<div style="font-size:1.08rem;font-weight:950;color:#f8fafc;margin-top:2px;">{exercise_name}</div>'
+                f'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">'
+                f'<span class="badge">Target {int(row.target_sets)} x {int(row.target_reps)}</span>'
+                f'<span class="badge green">{_to_text(row.muscle_group, "General")}</span>'
+                f'<span class="badge">Current Set: {completed_for_exercise + 1}</span>'
+                f'<span class="badge">Suggested: {current_weight_hint:.1f} lb</span>'
+                f'<span class="badge">RPE: {target_rpe_hint or "7-8"}</span>'
+                f'<span class="badge">Rest: {rest_hint or "90"}s</span>'
+                '</div></div>'
+            ),
+            unsafe_allow_html=True,
+        )
+
         # Replace Gym Mode set logging UI with Workout Command Center for consistent UX
         photo_html = img_tag(image_path(row)).replace('class="exercise-photo"', 'class="exercise-photo"')
         # Fetch exercise intelligence
         exercise_data = cached_exercise_profile(str(row.exercise))
+        last_stats = get_recent_exercise_stats(log, row.exercise)
+        st.session_state[f'{flow_key}_rest_context'] = {
+            'exercise_name': exercise_name,
+            'recommended_rest_seconds': _to_int(str(exercise_data.get('rest_seconds', '90')) or 90, 90),
+            'target_rpe': _to_text(exercise_data.get('target_rpe', '7'), '7'),
+            'last_set_rpe': 0,
+        }
         result = workout_command_center(
             row=row.to_dict(),
             idx=int(idx),
             total=len(active),
             photo_html=photo_html,
-            last_weight=get_recent_exercise_stats(log, row.exercise)[0] or float(row.base_weight),
-            last_reps=get_recent_exercise_stats(log, row.exercise)[1],
-            best_weight=get_recent_exercise_stats(log, row.exercise)[2] or float(row.base_weight),
+            last_weight=last_stats[0] or float(row.base_weight),
+            last_reps=last_stats[1],
+            best_weight=last_stats[2] or float(row.base_weight),
             sets=row.target_sets,
             reps_default=12,
             ai_cue="Coach: stay controlled and log every set.",
@@ -3746,9 +4457,125 @@ elif page == "Gym Mode":
             exercise_data=exercise_data,
             key_prefix="gym",
         )
+        swap_map = _get_swap_map(flow_key)
+        suggested_swaps = find_exercise_substitutions(
+            current_exercise=exercise_name,
+            exercise_library=_cached_exercise_library(),
+            equipment_available=st.session_state.get(f'{flow_key}_swap_equipment_{idx}', 'Show all'),
+            limit=5,
+            current_row=row.to_dict(),
+            log_df=log,
+        )
+
+        st.markdown('### Swap Exercise')
+        swap_bar_1, swap_bar_2, swap_bar_3 = st.columns([1.1, 1.0, 0.9])
+        with swap_bar_1:
+            swap_open = st.button('Swap This Exercise', key=f'{flow_key}_open_swap_{idx}', width='stretch')
+        with swap_bar_2:
+            st.selectbox(
+                'Equipment filter',
+                SWAP_EQUIPMENT_FILTERS,
+                key=f'{flow_key}_swap_equipment_{idx}',
+                label_visibility='collapsed',
+            )
+        with swap_bar_3:
+            st.caption('Keeps position, updates exercise data instantly')
+
+        if swap_open:
+            st.session_state[f'{flow_key}_swap_open_idx'] = int(idx)
+
+        swap_open_idx = st.session_state.get(f'{flow_key}_swap_open_idx')
+        if swap_open_idx == int(idx):
+            st.markdown('<div style="background:#071524;border:1px solid #2b527a;border-radius:14px;padding:12px;">', unsafe_allow_html=True)
+            reason = st.selectbox(
+                'Why are you swapping?',
+                SWAP_REASON_OPTIONS,
+                key=f'{flow_key}_swap_reason_{idx}',
+            )
+            if not suggested_swaps:
+                st.info('No strong alternatives found in the current library for this pattern.')
+            for candidate in suggested_swaps:
+                replacement_name = _to_text(candidate.get('exercise', ''), '').strip()
+                if not replacement_name:
+                    st.warning('One replacement option was skipped because it was missing a valid exercise name.')
+                    continue
+
+                swap_key = safe_key(
+                    f"{session_id}_{int(idx)}_{exercise_name}_{replacement_name}",
+                    prefix='swap',
+                )
+                c1, c2, c3 = st.columns([1.6, 1.2, 0.9])
+                with c1:
+                    st.markdown(
+                        f"**{replacement_name}**  \n"
+                        f"{_to_text(candidate.get('reason', 'Similar training purpose'))}"
+                    )
+                    perf_line = _to_text(candidate.get('previous_performance', ''), '').strip()
+                    if perf_line:
+                        st.caption(f"Previous: {perf_line} • PR: {_to_text(candidate.get('previous_pr', 'N/A'))}")
+                    else:
+                        st.caption('No replacement history yet. Select a starting weight around RPE 6-7.')
+                with c2:
+                    st.caption(
+                        f"Primary: {_to_text(candidate.get('primary_muscle', 'General'))}  |  "
+                        f"Equipment: {_to_text(candidate.get('equipment', 'General'))}"
+                    )
+                    st.caption(f"Match score: {float(candidate.get('similarity_score', 0)):.1f}")
+                with c3:
+                    if st.button('Use This Exercise', key=f"{swap_key}_use", width='stretch'):
+                        replacement = replacement_name
+                        image_file = _to_text(candidate.get('image_file', ''), '').strip()
+                        if not image_file:
+                            image_file = _cached_image_map_lookup().get(replacement.lower(), '')
+                        base_weight = float(candidate.get('recommended_start_weight', 0) or 0)
+                        if base_weight <= 0:
+                            base_weight = float(row.get('base_weight', 0) or 0)
+                        swap_row = {
+                            'exercise': replacement,
+                            'muscle_group': _to_text(candidate.get('primary_muscle', row.get('muscle_group', 'General')), 'General'),
+                            'target_sets': int(float(row.get('target_sets', 3) or 3)),
+                            'target_reps': int(float(row.get('target_reps', 10) or 10)),
+                            'base_weight': float(base_weight),
+                            'image_file': image_file,
+                        }
+                        swap_map[str(int(idx))] = swap_row
+                        st.session_state[f'{flow_key}_swap_map'] = swap_map
+                        history = st.session_state.get(f'{flow_key}_swap_history', [])
+                        if not isinstance(history, list):
+                            history = []
+                        history.append(
+                            {
+                                'session_id': session_id,
+                                'position': int(idx) + 1,
+                                'original_exercise': exercise_name,
+                                'replacement_exercise': replacement,
+                                'reason': reason,
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'kept': ['set targets', 'set index', 'session ID'],
+                                'updated': ['exercise name', 'image', 'coaching profile', 'history metrics'],
+                            }
+                        )
+                        st.session_state[f'{flow_key}_swap_history'] = history
+
+                        # Keep completed rows aligned to the replacement name for this position.
+                        for pending in pending_sets:
+                            if int(float(pending.get('workout_position', idx + 1) or 0)) == int(idx + 1):
+                                pending['exercise'] = replacement
+
+                        st.session_state[f'{flow_key}_swap_open_idx'] = None
+                        st.success(f"Swapped {exercise_name} -> {replacement}. Position and session are preserved.")
+                        st.rerun()
+                    if st.button('View Exercise', key=f"{swap_key}_view", width='stretch'):
+                        st.info(f"Exercise detail: {replacement_name} • {_to_text(candidate.get('equipment', 'General'))}")
+            if st.button('Cancel Swap', key=f'{flow_key}_swap_cancel_{idx}', width='stretch'):
+                st.session_state[f'{flow_key}_swap_open_idx'] = None
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
         if result.get('complete'):
             st.session_state[saving_key] = True
-            set_row = build_set_row(day=day, exercise=row.exercise, result=result, session_id=session_id)
+            set_row = build_set_row(day=day, exercise=exercise_name, result=result, session_id=session_id)
+            set_row['workout_position'] = int(idx) + 1
             single_set_result = save_completed_set(set_row)
             save_result = {
                 'supabase_ok': bool(single_set_result.get('ok')),
@@ -3779,7 +4606,7 @@ elif page == "Gym Mode":
                 'attempted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'status': 'success' if bool(save_result.get('supabase_ok')) else 'error',
                 'error': str(save_result.get('supabase_error', '') or save_result.get('csv_error', '') or ''),
-                'last_saved_exercise': str(row.exercise),
+                'last_saved_exercise': str(exercise_name),
                 'last_save_source': 'supabase' if bool(save_result.get('supabase_ok')) else 'backup_only',
                 'last_workout_session_id': str(save_result.get('session_id', session_id)),
                 'session_id_supported': bool(save_result.get('session_id_supported', False)),
@@ -3807,6 +4634,14 @@ elif page == "Gym Mode":
                 timer_state['running'] = False
                 timer_state['started_at'] = None
                 timer_state['last_completed_set_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                execution_feedback = build_execution_feedback(row, result, last_stats, exercise_data, _to_text(exercise_data.get('target_rpe', '7'), '7'), int(_to_int(exercise_data.get('rest_seconds', 90), 90)))
+                st.session_state[f'{flow_key}_last_execution_feedback'] = execution_feedback
+                if float(execution_feedback.get('confidence', 0) or 0) >= 90:
+                    st.session_state[f'{flow_key}_recent_pr_burst'] = {
+                        'headline': 'New PR detected' if float(result.get('weight', 0) or 0) >= float(last_stats[2] or 0) else 'Strong set logged',
+                        'detail': f"{exercise_name}: {execution_feedback.get('result_label', 'On Target')} • {execution_feedback.get('comparison', '')}",
+                    }
+                st.session_state[f'{flow_key}_learning_observations'] = list(st.session_state.get(f'{flow_key}_learning_observations', [])) + [execution_feedback.get('learning_observation', {})]
                 render_cloud_save_success(save_result)
             else:
                 render_cloud_save_failure(save_result)
@@ -3834,7 +4669,20 @@ elif page == "Gym Mode":
                     if save_result.get('supabase_ok'):
                         render_cloud_save_success(save_result)
                         render_session_summary(save_result, session_sets, flow_key=flow_key)
+                        swap_history = st.session_state.get(f'{flow_key}_swap_history', [])
+                        if isinstance(swap_history, list) and swap_history:
+                            st.markdown('### Exercise Swaps During Session')
+                            for swap_event in swap_history:
+                                st.markdown(
+                                    f"- Pos {int(swap_event.get('position', 0))}: "
+                                    f"{_to_text(swap_event.get('original_exercise', ''))} -> "
+                                    f"{_to_text(swap_event.get('replacement_exercise', ''))} "
+                                    f"({_to_text(swap_event.get('reason', ''))}) at {_to_text(swap_event.get('timestamp', ''))}"
+                                )
+                            st.caption('Kept: set targets, position, workout session tracking. Updated: exercise profile, image, history guidance.')
                         clear_pending_sets(flow_key)
+                        st.session_state[f'{flow_key}_swap_map'] = {}
+                        st.session_state[f'{flow_key}_swap_history'] = []
                         st.session_state[f'{flow_key}_started_at'] = None
                     else:
                         render_cloud_save_failure(save_result)
@@ -4216,6 +5064,25 @@ elif page == "Weekly Plan":
         st.markdown(f'<div class="side-card"><div class="side-title">{day} — {group}</div><div class="small">{len(d)} exercises</div><div style="margin-top:8px;color:#c8ddff">{names}</div></div>', unsafe_allow_html=True)
 
 
+elif page == 'System Center':
+    db_ok, db_msg = health_check()
+    import_summary = cached_get_import_summary() if callable(cached_get_import_summary) else {}
+    import_summary = import_summary if isinstance(import_summary, dict) else {}
+    last_save = get_last_save_result() if callable(get_last_save_result) else {}
+    last_save = last_save if isinstance(last_save, dict) else {}
+    status_payload = {
+        'supabase': 'Connected' if db_ok else f"Unavailable ({_to_text(db_msg, 'unknown')})",
+        'recovery_engine': 'Available',
+        'ai_coach': 'Available',
+        'last_workout_save': _to_text(last_save.get('saved_at', '-'), '-'),
+        'last_cardio_save': _to_text(last_save.get('cardio_saved_at', '-'), '-'),
+        'last_apple_import': _to_text(import_summary.get('last_import_at', '-'), '-'),
+        'flags': all_flags(),
+        'build': DISPLAY_KICKER,
+    }
+    render_system_center(status_payload)
+
+
 elif page == "System Check":
     st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">System Check + Backup</div><div class="sub">Daily-use stability tools: validate workouts, images, files, and backups.</div></div>', unsafe_allow_html=True)
     issues=[]
@@ -4294,6 +5161,7 @@ elif page == "Nutrition":
         notes = st.text_input('Notes', placeholder='Chicken, rice, protein shake, etc.', key='nut_notes')
         if st.button('💾 Save nutrition entry'):
             append_csv(NUTRITION, {'date':entry_date,'meal':meal,'calories':calories,'protein_g':protein,'carbs_g':carbs,'fat_g':fat,'water_oz':water,'notes':notes}, cols)
+            publish_event('nutrition_updated', {'date': entry_date})
             st.success('Nutrition entry saved.')
     with right:
         today_df = nut[nut['date'].astype(str)==today_s] if not nut.empty else nut
