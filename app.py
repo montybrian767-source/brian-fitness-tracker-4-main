@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 import base64
+import logging
 import pandas as pd
 import streamlit as st
 import textwrap
@@ -10,7 +11,21 @@ import textwrap
 from config.version import APP_NAME, APP_VERSION, BUILD_LABEL, DISPLAY_KICKER, DISPLAY_NAME
 from core.cache_manager import publish_event, register_cache_invalidation
 from core.feature_flags import all_flags, is_enabled
-from core.routing import default_home_route
+from core.onboarding_state import (
+    apply_completed_onboarding_state,
+    apply_skip_onboarding_state,
+    safe_onboarding_persist,
+    should_show_onboarding,
+)
+try:
+    from core.routing import default_home_route, normalize_route, page_from_route, route_from_page
+except ImportError:
+    # Defensive fallback for rare stale-import states in Streamlit hot-reload.
+    from core.routing import default_home_route, page_from_route, route_from_page
+
+    def normalize_route(route: str | None, fallback: str | None = None) -> str:
+        key = route_from_page(route)
+        return key or default_home_route()
 
 from components.ai_card import ai_card
 from components.executive_header import executive_header
@@ -107,6 +122,7 @@ CARDIO_LOG = DATA / "cardio_sessions.csv"
 COACH_GOALS = DATA / "coach_goals.csv"
 COACH_PREFERENCES = DATA / "coach_preferences.csv"
 COACHING_FEEDBACK = DATA / "coaching_feedback.csv"
+ONBOARDING_STATE = DATA / "onboarding_state.csv"
 
 COACH_GOAL_COLUMNS = ['updated_at', 'primary_goal', 'secondary_goals']
 COACH_PREFERENCE_COLUMNS = [
@@ -117,6 +133,26 @@ COACHING_FEEDBACK_COLUMNS = [
     'created_at', 'workout_session_id', 'recommendation_date', 'recommended_category', 'recommended_focus',
     'readiness_score', 'feedback_rating', 'notes'
 ]
+ONBOARDING_STATE_COLUMNS = ['updated_at', 'onboarding_completed', 'onboarding_skipped']
+
+UI_LAYER_STATE_KEYS = [
+    'show_onboarding',
+    'show_onboarding_overlay',
+    'show_mobile_overlay',
+    'show_mobile_menu',
+    'show_plan_preview',
+    'show_start_plan_modal',
+    'show_skip_confirmation',
+    'show_loading_overlay',
+    'show_bottom_sheet',
+    'show_dialog',
+    'active_modal',
+    'active_popover',
+    'mobile_menu_open',
+    'onboarding_visible',
+]
+
+_overlay_logger = logging.getLogger('brianfit.overlay')
 
 st.set_page_config(page_title=DISPLAY_NAME, page_icon="🏋️", layout="wide", initial_sidebar_state="expanded")
 
@@ -171,6 +207,7 @@ def ensure_health_logs():
     ensure_csv(COACH_GOALS, COACH_GOAL_COLUMNS)
     ensure_csv(COACH_PREFERENCES, COACH_PREFERENCE_COLUMNS)
     ensure_csv(COACHING_FEEDBACK, COACHING_FEEDBACK_COLUMNS)
+    ensure_csv(ONBOARDING_STATE, ONBOARDING_STATE_COLUMNS)
 ensure_health_logs()
 
 
@@ -746,7 +783,7 @@ def save_coach_preferences(preferences: dict) -> None:
     publish_event('preferences_updated', {'keys': list(preferences.keys()) if isinstance(preferences, dict) else []})
 
 
-def onboarding_completed() -> bool:
+def onboarding_preferences_completed() -> bool:
     df = read_csv_safe(COACH_PREFERENCES, COACH_PREFERENCE_COLUMNS)
     if df.empty:
         return False
@@ -757,6 +794,64 @@ def onboarding_completed() -> bool:
         _to_text(row.get('equipment_access', ''), '').strip(),
     ]
     return any(marker_fields)
+
+
+def onboarding_completed() -> bool:
+    if bool(st.session_state.get('onboarding_completed')) or bool(st.session_state.get('onboarding_skipped')):
+        return True
+
+    onboarding_state_df = read_csv_safe(ONBOARDING_STATE, ONBOARDING_STATE_COLUMNS)
+    if not onboarding_state_df.empty:
+        row = onboarding_state_df.iloc[-1]
+        completed = _to_text(row.get('onboarding_completed', ''), '').lower() in {'true', '1', 'yes'}
+        skipped = _to_text(row.get('onboarding_skipped', ''), '').lower() in {'true', '1', 'yes'}
+        if completed or skipped:
+            return True
+
+    return onboarding_preferences_completed()
+
+
+def _overlay_state_snapshot() -> dict[str, bool]:
+    return {key: bool(st.session_state.get(key)) for key in UI_LAYER_STATE_KEYS}
+
+
+def log_overlay_diagnostic(event: str) -> None:
+    payload = {
+        'event': str(event),
+        'active_route': str(st.session_state.get('active_route', '')),
+        'onboarding_complete': bool(st.session_state.get('onboarding_complete') or st.session_state.get('onboarding_completed')),
+        'overlay_states': _overlay_state_snapshot(),
+    }
+    st.session_state['overlay_diagnostic'] = payload
+    _overlay_logger.info(
+        'overlay_diagnostic event=%s active_route=%s onboarding_complete=%s overlay_states=%s',
+        payload['event'],
+        payload['active_route'],
+        payload['onboarding_complete'],
+        payload['overlay_states'],
+    )
+
+
+def clear_all_ui_layers() -> None:
+    for key in UI_LAYER_STATE_KEYS:
+        st.session_state.pop(key, None)
+    log_overlay_diagnostic('clear_all_ui_layers')
+
+
+def clear_mobile_overlays() -> None:
+    clear_all_ui_layers()
+
+
+def has_active_ui_layers() -> bool:
+    return any(bool(st.session_state.get(key)) for key in UI_LAYER_STATE_KEYS)
+
+
+def render_mobile_overlay() -> None:
+    st.markdown('<div class="brianfit-overlay" data-open="true"></div>', unsafe_allow_html=True)
+
+
+def show_dev_overlay_recovery() -> bool:
+    return bool(st.session_state.get('dev_overlay_recovery')) or is_enabled('FITNESS_OS_DEV_OVERLAY_RECOVERY', default=False)
 
 
 def render_onboarding_flow() -> bool:
@@ -799,6 +894,27 @@ def render_onboarding_flow() -> bool:
     equipment_access = st.selectbox('Equipment access', ['Full Gym', 'LA Fitness', 'Home Dumbbells', 'Machines Only', 'Limited Equipment'], index=0)
     apple_imported = st.selectbox('Apple Health import status', ['Not yet', 'Imported'])
 
+    def persist_onboarding_state(completed: bool, skipped: bool) -> str:
+        return safe_onboarding_persist(
+            lambda: append_csv(
+                ONBOARDING_STATE,
+                {
+                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'onboarding_completed': bool(completed),
+                    'onboarding_skipped': bool(skipped),
+                },
+                ONBOARDING_STATE_COLUMNS,
+            )
+        )
+
+    def skip_onboarding() -> None:
+        clear_all_ui_layers()
+        apply_skip_onboarding_state(st.session_state)
+        persist_error = persist_onboarding_state(completed=True, skipped=True)
+        if persist_error:
+            st.session_state['onboarding_warning'] = f"Could not save onboarding preference, but you can keep using Brian Fit. ({persist_error})"
+        log_overlay_diagnostic('skip_onboarding')
+
     c1, c2, c3 = st.columns(3)
     if c1.button('Back', width='stretch', disabled=step == 1):
         st.session_state['onboarding_step'] = max(1, step - 1)
@@ -806,29 +922,52 @@ def render_onboarding_flow() -> bool:
     if c2.button('Next', width='stretch', disabled=step == 8):
         st.session_state['onboarding_step'] = min(8, step + 1)
         st.rerun()
-    if c3.button('Skip for now', width='stretch'):
-        st.session_state['onboarding_skipped'] = True
-        return True
+    c3.button(
+        'Skip for now',
+        width='stretch',
+        key='onboarding_skip_for_now',
+        on_click=skip_onboarding,
+    )
+
+    if bool(st.session_state.get('onboarding_skipped')) or bool(st.session_state.get('onboarding_completed')):
+        st.rerun()
+
+    warning_msg = _to_text(st.session_state.pop('onboarding_warning', ''), '').strip()
+    if warning_msg:
+        st.warning(warning_msg)
 
     if st.button('Start First Plan', width='stretch', key='onboarding_start_plan'):
-        save_coach_goals(goal, [])
-        save_coach_preferences(
-            {
-                'preferred_workout_duration': duration,
-                'training_days_per_week': days_per_week,
-                'preferred_cardio_types': cardio_types,
-                'preferred_strength_split': 'Balanced Split',
-                'equipment_access': equipment_access,
-                'aggressiveness': 'Balanced',
-                'avoided_exercises': [],
-                'preferred_rest_days': ['Sunday'],
-            }
+        save_error = safe_onboarding_persist(
+            lambda: (
+                save_coach_goals(goal, []),
+                save_coach_preferences(
+                    {
+                        'preferred_workout_duration': duration,
+                        'training_days_per_week': days_per_week,
+                        'preferred_cardio_types': cardio_types,
+                        'preferred_strength_split': 'Balanced Split',
+                        'equipment_access': equipment_access,
+                        'aggressiveness': 'Balanced',
+                        'avoided_exercises': [],
+                        'preferred_rest_days': ['Sunday'],
+                    }
+                ),
+            )
         )
+        persist_error = persist_onboarding_state(completed=True, skipped=False)
+        if save_error or persist_error:
+            st.warning('Preferences could not be fully saved, but routing will continue.')
         if apple_imported == 'Not yet':
             st.info('Import an Apple Health export to unlock activity and recovery insights.')
         st.success('Onboarding complete. You can edit these preferences later in Coach.')
-        st.session_state['onboarding_completed'] = True
-        return True
+        clear_all_ui_layers()
+        apply_completed_onboarding_state(st.session_state)
+        st.session_state['active_route'] = 'workout'
+        st.session_state['current_page'] = 'workout'
+        st.session_state['mobile_route'] = 'workout'
+        st.session_state['mobile_nav_override'] = 'Workout'
+        log_overlay_diagnostic('start_first_plan')
+        st.rerun()
 
     st.caption('Edit later in Coach > Goals and Coach Preferences.')
     return False
@@ -1669,8 +1808,10 @@ def get_mobile_primary_page() -> str:
     if forced_mobile_target in ['Mission', 'Coach', 'Workout', 'History', 'Progress', 'More']:
         st.session_state['mobile_primary_nav'] = forced_mobile_target
 
-    default_route = default_home_route()
-    current = str(st.session_state.get('active_route', st.session_state.get('main_nav', default_route)))
+    default_page = default_home_route()
+    default_route = route_from_page(default_page)
+    current_route = normalize_route(st.session_state.get('active_route', st.session_state.get('main_nav', default_route)))
+    current = page_from_route(current_route)
     reverse = {
         'Command Center': 'Mission',
         'Dashboard': 'Mission',
@@ -1685,20 +1826,20 @@ def get_mobile_primary_page() -> str:
         'Exercise Library': 'More',
         'System Center': 'More',
     }
-    current_mobile = reverse.get(current, current if current in mapping else default_route)
+    current_mobile = reverse.get(current, current if current in mapping else 'Mission')
 
     nav_choices = ['Mission', 'Coach', 'Workout', 'History', 'Progress', 'More']
 
-    st.markdown('<div class="mobile-nav-shell">', unsafe_allow_html=True)
-    selected = st.radio(
-        'Mobile Primary Navigation',
-        nav_choices,
-        horizontal=True,
-        key='mobile_primary_nav',
-        index=nav_choices.index(current_mobile) if current_mobile in nav_choices else 0,
-        label_visibility='collapsed',
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    radio_kwargs = {
+        'label': 'Mobile Primary Navigation',
+        'options': nav_choices,
+        'horizontal': True,
+        'key': 'mobile_primary_nav',
+        'label_visibility': 'collapsed',
+    }
+    if 'mobile_primary_nav' not in st.session_state:
+        radio_kwargs['index'] = nav_choices.index(current_mobile) if current_mobile in nav_choices else 0
+    selected = st.radio(**radio_kwargs)
 
     if forced_mobile_target in nav_choices and selected != forced_mobile_target:
         selected = forced_mobile_target
@@ -1725,19 +1866,24 @@ def get_mobile_primary_page() -> str:
             'System Center': 'System Center',
         }
         target_route = route_map.get(more_target, 'Command Center')
+        clear_all_ui_layers()
         set_active_route(target_route)
         return target_route
 
     st.session_state['mobile_more_active'] = False
     target = mapping[selected]
+    clear_all_ui_layers()
     set_active_route(target)
     return target
 
 
 def set_active_route(route: str) -> None:
-    target = str(route or default_home_route())
-    st.session_state['active_route'] = target
+    route_key = normalize_route(route_from_page(str(route or default_home_route())))
+    target = page_from_route(route_key)
+    st.session_state['active_route'] = route_key
     st.session_state['main_nav'] = target
+    st.session_state['current_page'] = route_key
+    st.session_state['mobile_route'] = route_key
 
 
 def get_rest_timer_state(flow_key: str) -> dict:
@@ -3044,15 +3190,15 @@ section[data-testid="stSidebar"] h2 {font-size:1.45rem !important;}
 
 /* 3.2 Mobile navigation fix */
 .mobile-nav-title{display:none;}
-div[role="radiogroup"]{gap:8px; flex-wrap:wrap;}
-div[role="radiogroup"] label{background:#0f1f34 !important; border:1px solid #254264 !important; border-radius:14px !important; padding:8px 12px !important; margin:4px 2px !important; color:#f8fafc !important; font-weight:900 !important;}
-div[role="radiogroup"] label:hover{border-color:#60a5fa !important; background:#12375f !important;}
-div[role="radiogroup"] label[data-checked="true"], div[role="radiogroup"] label:has(input:checked){background:linear-gradient(135deg,#2563eb,#22c55e) !important; border-color:#22c55e !important; color:white !important; box-shadow:0 0 18px rgba(34,197,94,.35) !important;}
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"]{gap:8px; flex-wrap:wrap;}
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label{background:#0f1f34 !important; border:1px solid #254264 !important; border-radius:14px !important; padding:8px 12px !important; margin:4px 2px !important; color:#f8fafc !important; font-weight:900 !important;}
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label:hover{border-color:#60a5fa !important; background:#12375f !important;}
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label[data-checked="true"], div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label:has(input:checked){background:linear-gradient(135deg,#2563eb,#22c55e) !important; border-color:#22c55e !important; color:white !important; box-shadow:0 0 18px rgba(34,197,94,.35) !important;}
 @media (max-width: 900px){
   section[data-testid="stSidebar"]{display:none !important;}
-  .mobile-nav-title{display:block; position:sticky; top:0; z-index:999; background:#07111f; border:1px solid #254264; border-radius:14px; padding:10px 12px; margin-bottom:8px; font-weight:950; color:#22c55e;}
-  div[role="radiogroup"]{position:sticky; top:48px; z-index:998; background:#07111f; padding:8px; border:1px solid #254264; border-radius:16px; margin-bottom:14px; box-shadow:0 12px 30px rgba(0,0,0,.3);}
-  div[role="radiogroup"] label{font-size:.82rem !important; padding:8px 10px !important;}
+    .mobile-nav-title{display:block; position:sticky; top:0; z-index:100; background:#07111f; border:1px solid #254264; border-radius:14px; padding:10px 12px; margin-bottom:8px; font-weight:950; color:#22c55e;}
+    div[role="radiogroup"][aria-label="Mobile Primary Navigation"]{position:sticky; top:48px; z-index:100; background:#07111f; padding:8px; border:1px solid #254264; border-radius:16px; margin-bottom:14px; box-shadow:0 12px 30px rgba(0,0,0,.3);}
+    div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label{font-size:.82rem !important; padding:8px 10px !important;}
   .hero{padding:18px !important;}
   .title{font-size:1.55rem !important;}
 }
@@ -3061,43 +3207,43 @@ div[role="radiogroup"] label[data-checked="true"], div[role="radiogroup"] label:
 
 /* 3.2.2 TOP NAV CONTRAST FIX */
 /* Make horizontal top navigation readable on dark background */
-div[role="radiogroup"] label,
-div[role="radiogroup"] label *,
-div[role="radiogroup"] label p,
-div[role="radiogroup"] label span {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label,
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label *,
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label p,
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label span {
     color: #f8fafc !important;
     opacity: 1 !important;
     font-weight: 900 !important;
     text-shadow: 0 1px 2px rgba(0,0,0,.55) !important;
 }
 
-div[role="radiogroup"] label {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label {
     background: linear-gradient(135deg, #10263f, #0b1e33) !important;
     border: 1.5px solid #3b82f6 !important;
     box-shadow: 0 4px 14px rgba(0,0,0,.28) !important;
 }
 
-div[role="radiogroup"] label:hover {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label:hover {
     background: linear-gradient(135deg, #1d4ed8, #0f766e) !important;
     border-color: #60a5fa !important;
 }
 
-div[role="radiogroup"] label[data-checked="true"],
-div[role="radiogroup"] label:has(input:checked) {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label[data-checked="true"],
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label:has(input:checked) {
     background: linear-gradient(135deg, #2563eb, #22c55e) !important;
     border: 2px solid #86efac !important;
     box-shadow: 0 0 18px rgba(34,197,94,.55) !important;
 }
 
-div[role="radiogroup"] label[data-checked="true"] *,
-div[role="radiogroup"] label:has(input:checked) * {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label[data-checked="true"] *,
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] label:has(input:checked) * {
     color: #ffffff !important;
     opacity: 1 !important;
 }
 
 /* Make the small radio dots visible but not distracting */
-div[role="radiogroup"] input[type="radio"] + div,
-div[role="radiogroup"] [data-testid="stMarkdownContainer"] {
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] input[type="radio"] + div,
+div[role="radiogroup"][aria-label="Mobile Primary Navigation"] [data-testid="stMarkdownContainer"] {
     color: #f8fafc !important;
     opacity: 1 !important;
 }
@@ -3222,15 +3368,38 @@ with st.sidebar.expander('Advanced Navigation', expanded=False):
     if st.button('Open Route', width='stretch', key='dev_open_route'):
         set_active_route(dev_target)
         st.rerun()
+    if show_dev_overlay_recovery() and st.button('Reset Mobile View', width='stretch', key='dev_close_overlay'):
+        clear_all_ui_layers()
+        set_active_route('AI Personal Trainer')
+        log_overlay_diagnostic('dev_close_overlay')
+        st.rerun()
 
-if not onboarding_completed() and not bool(st.session_state.get('onboarding_skipped', False)):
+if should_show_onboarding(
+    st.session_state,
+    persisted_complete=onboarding_completed(),
+    preferences_complete=onboarding_preferences_completed(),
+):
     onboarding_ready = render_onboarding_flow()
     if not onboarding_ready:
         summarize_perf('Onboarding')
         st.stop()
 
 page = get_mobile_primary_page()
+active_route = normalize_route(st.session_state.get('active_route'))
+st.session_state['active_route'] = active_route
+page = page_from_route(active_route)
 set_active_route(page)
+log_overlay_diagnostic('route_ready')
+
+if bool(st.session_state.get('show_mobile_overlay', False)):
+    render_mobile_overlay()
+
+if has_active_ui_layers() and st.button('Reset Mobile View', key='reset_mobile_view_fallback', width='content'):
+    clear_all_ui_layers()
+    set_active_route('AI Personal Trainer')
+    log_overlay_diagnostic('reset_mobile_view')
+    st.rerun()
+
 clear_render_metrics()
 
 needs_workouts = page in {
@@ -6280,5 +6449,27 @@ on public.workouts (
         st.download_button('Export supplement_log.csv', SUPPLEMENTS.read_bytes(), file_name='supplement_log.csv')
     if SUPPLEMENT_PLAN.exists():
         st.download_button('Export supplement_plan.csv', SUPPLEMENT_PLAN.read_bytes(), file_name='supplement_plan.csv')
+
+else:
+    st.warning('Brian Fit could not open the selected page.')
+    fb1, fb2, fb3, fb4 = st.columns(4)
+    if fb1.button("Open Today's Mission", width='stretch', key='fallback_open_mission'):
+        clear_all_ui_layers()
+        set_active_route('Command Center')
+        log_overlay_diagnostic('fallback_open_mission')
+        st.rerun()
+    if fb2.button('Open AI Coach', width='stretch', key='fallback_open_ai'):
+        clear_all_ui_layers()
+        set_active_route('AI Personal Trainer')
+        log_overlay_diagnostic('fallback_open_ai')
+        st.rerun()
+    if fb3.button('Reload App', width='stretch', key='fallback_reload_app'):
+        log_overlay_diagnostic('fallback_reload_app')
+        st.rerun()
+    if fb4.button('Reset Mobile View', width='stretch', key='fallback_close_overlay'):
+        clear_all_ui_layers()
+        set_active_route('AI Personal Trainer')
+        log_overlay_diagnostic('fallback_close_overlay')
+        st.rerun()
 
 summarize_perf(page)

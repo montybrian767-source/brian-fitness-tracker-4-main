@@ -158,6 +158,21 @@ def inject_global_styles() -> None:
               box-shadow: var(--shadow-card);
             }}
 
+            .brianfit-overlay {{
+              position: fixed;
+              inset: 0;
+              min-height: 100dvh;
+              z-index: 900;
+              background: rgba(3, 8, 16, 0.35);
+              pointer-events: auto;
+            }}
+
+            .brianfit-overlay[data-open="false"] {{
+              display: none !important;
+              visibility: hidden !important;
+              pointer-events: none !important;
+            }}
+
             @keyframes fadeRise {{
               from {{ opacity: 0; transform: translateY(4px); }}
               to {{ opacity: 1; transform: translateY(0); }}
@@ -169,15 +184,13 @@ def inject_global_styles() -> None:
               }}
 
               .mobile-nav-shell {{
-                position: fixed;
-                left: 10px;
-                right: 10px;
-                bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
-                z-index: 999;
+                position: sticky;
+                top: 0;
+                z-index: 100;
                 background: rgba(4, 11, 22, 0.96);
                 backdrop-filter: blur(10px);
                 padding: 8px;
-                margin: 0;
+                margin: 0 0 12px 0;
               }}
 
               .mobile-nav-shell div[role="radiogroup"] {{
