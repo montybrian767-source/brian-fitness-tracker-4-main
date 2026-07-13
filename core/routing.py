@@ -62,7 +62,9 @@ ROUTE_ALIASES = {
     'system check': 'system_center',
     'exercise media manager': 'exercise_media_manager',
     'media manager': 'exercise_media_manager',
-    'history_center': 'history_center',
+    'history_center': 'history',
+    'workout_history': 'history',
+    'session_history': 'history',
     'smart_scale': 'smart_scale_import',
 }
 

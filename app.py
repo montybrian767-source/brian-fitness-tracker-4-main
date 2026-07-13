@@ -1968,6 +1968,8 @@ def get_mobile_primary_page() -> str:
     clear_all_ui_layers()
     if selected == 'Workout':
         go_to_workout_render_sync()
+    elif selected == 'History':
+        go_to_history_render_sync()
     else:
         set_active_route(target)
     return target
@@ -1990,7 +1992,7 @@ def _set_workout_route(sync_mobile_nav: bool) -> None:
     st.session_state['mobile_route'] = 'workout'
     if sync_mobile_nav:
         st.session_state['mobile_primary_nav'] = 'Workout'
-    st.session_state['mobile_nav_override'] = 'Workout'
+        st.session_state['mobile_nav_override'] = 'Workout'
     st.session_state.pop('force_page_once', None)
 
 
@@ -2002,10 +2004,33 @@ def go_to_workout_render_sync() -> None:
     _set_workout_route(sync_mobile_nav=False)
 
 
+def _set_history_route(sync_mobile_nav: bool) -> None:
+    # Canonical History route for all user-facing History navigation paths.
+    st.session_state['active_route'] = 'history'
+    st.session_state['main_nav'] = page_from_route('history')
+    st.session_state['current_page'] = 'history'
+    st.session_state['mobile_route'] = 'history'
+    if sync_mobile_nav:
+        st.session_state['mobile_primary_nav'] = 'History'
+        st.session_state['mobile_nav_override'] = 'History'
+    st.session_state.pop('force_page_once', None)
+
+
+def go_to_history() -> None:
+    _set_history_route(sync_mobile_nav=True)
+
+
+def go_to_history_render_sync() -> None:
+    _set_history_route(sync_mobile_nav=False)
+
+
 def on_mobile_primary_nav_change() -> None:
     selected = _to_text(st.session_state.get('mobile_primary_nav', 'Home'), 'Home')
     if selected == 'Workout':
         go_to_workout_render_sync()
+        return
+    if selected == 'History':
+        go_to_history_render_sync()
         return
 
     route_map = {
@@ -2411,9 +2436,7 @@ def render_session_summary(save_result: dict, session_sets: list[dict], flow_key
         st.caption('Coaching feedback already saved for this session.')
 
     c1, c2, c3 = st.columns(3)
-    if c1.button('View History', key=f'{flow_key}_summary_history', width='stretch'):
-        set_active_route('History')
-        st.rerun()
+    c1.button('View History', key=f'{flow_key}_summary_history', width='stretch', on_click=go_to_history)
     if c2.button('View Progress', key=f'{flow_key}_summary_progress', width='stretch'):
         set_active_route('Progress Analytics')
         st.rerun()
@@ -3755,9 +3778,11 @@ if page == 'Home':
         if row2.button('Ask Coach', key='x12_home_ask_coach', width='stretch'):
             st.session_state['x12_show_home_coach'] = True
 
-        if st.button('Recovery Instead', key='x12_home_recovery_instead', width='stretch'):
+        row3, row4 = st.columns(2)
+        if row3.button('Recovery Instead', key='x12_home_recovery_instead', width='stretch'):
             st.session_state['force_page_once'] = 'Recovery & Readiness'
             st.rerun()
+        row4.button('View History', key='x12_home_view_history', width='stretch', on_click=go_to_history)
 
         if bool(st.session_state.get('x12_show_home_coach', False)):
             st.markdown('#### Coach Conversation')
@@ -4129,8 +4154,7 @@ elif page == "AI Personal Trainer":
         st.session_state['mobile_nav_override'] = 'More'
         st.rerun()
     if coach_action == 'review_yesterday':
-        set_active_route('History')
-        st.session_state['mobile_nav_override'] = 'History'
+        go_to_history_render_sync()
         st.rerun()
     summarize_perf(page)
     st.stop()
@@ -6678,65 +6702,75 @@ elif page == "Exercise Library":
     exercise_library_page.render_exercise_library_page(ASSETS, workout_log_df=load_log())
 
 elif page == "History" and not SHOW_DEVELOPER_TOOLS:
-    st.markdown('### History')
-    history_filter = st.selectbox('Filter', ['All', 'Strength', 'Cardio', 'Sport'], key='mvp_history_filter')
+    try:
+        st.markdown('### History')
+        history_filter = st.selectbox('Filter', ['All', 'Strength', 'Cardio', 'Sport'], key='mvp_history_filter')
 
-    history_log, _, _ = load_log(return_meta=True, days=90)
-    history_log = history_log if isinstance(history_log, pd.DataFrame) else pd.DataFrame()
-    cardio_df, _, _, _ = load_cardio_log(return_meta=True, days=90)
-    cardio_df = cardio_df if isinstance(cardio_df, pd.DataFrame) else pd.DataFrame()
-    apple_df, _ = cached_get_apple_workouts(days=90)
-    apple_df = apple_df if isinstance(apple_df, pd.DataFrame) else pd.DataFrame()
-    recent_prs = get_recent_pr_events(history_log, days=90) if not history_log.empty else pd.DataFrame()
+        history_log, _, _ = load_log(return_meta=True, days=90)
+        history_log = history_log if isinstance(history_log, pd.DataFrame) else pd.DataFrame()
+        cardio_df, _, _, _ = load_cardio_log(return_meta=True, days=90)
+        cardio_df = cardio_df if isinstance(cardio_df, pd.DataFrame) else pd.DataFrame()
+        apple_df, _ = cached_get_apple_workouts(days=90)
+        apple_df = apple_df if isinstance(apple_df, pd.DataFrame) else pd.DataFrame()
+        recent_prs = get_recent_pr_events(history_log, days=90) if not history_log.empty else pd.DataFrame()
 
-    if not history_log.empty and history_filter in {'All', 'Strength'}:
-        history_log = history_log.copy()
-        sessions = group_sessions(history_log)
-        st.markdown('#### Strength Workouts')
-        for _, row in sessions.head(10).iterrows():
-            dt = _to_text(row.get('date', ''), '')
-            focus = _to_text(row.get('focus', 'Strength'), 'Strength')
-            duration = _to_text(row.get('duration', ''), '')
-            exercises = int(_to_int(row.get('exercises', 0), 0))
-            volume = int(_to_float(row.get('total_volume', 0.0), 0.0))
-            pr_count = int(_to_int(row.get('pr_count', 0), 0))
-            st.markdown(f"- **{dt}** • {focus} • {duration if duration else 'Duration N/A'} • {exercises} exercises • {volume:,} volume • PRs: {pr_count}")
-    elif history_filter == 'Strength':
-        st.info('Workout history could not load.')
+        if not history_log.empty and history_filter in {'All', 'Strength'}:
+            history_log = history_log.copy()
+            sessions = group_sessions(history_log)
+            st.markdown('#### Strength Workouts')
+            for _, row in sessions.head(10).iterrows():
+                dt = _to_text(row.get('date', ''), '')
+                focus = _to_text(row.get('focus', 'Strength'), 'Strength')
+                duration = _to_text(row.get('duration', ''), '')
+                exercises = int(_to_int(row.get('exercises', 0), 0))
+                volume = int(_to_float(row.get('total_volume', 0.0), 0.0))
+                pr_count = int(_to_int(row.get('pr_count', 0), 0))
+                st.markdown(f"- **{dt}** • {focus} • {duration if duration else 'Duration N/A'} • {exercises} exercises • {volume:,} volume • PRs: {pr_count}")
+        elif history_filter == 'Strength':
+            st.info('Workout history could not load.')
 
-    if history_filter in {'All', 'Cardio', 'Sport'}:
-        if not cardio_df.empty:
-            cdf = cardio_df.copy()
-            activity = cdf.get('activity_type', pd.Series(dtype=str)).astype(str)
-            if history_filter == 'Cardio':
-                cdf = cdf[~activity.isin(SPORT_ACTIVITY_TYPES)]
-            elif history_filter == 'Sport':
-                cdf = cdf[activity.isin(SPORT_ACTIVITY_TYPES)]
-            st.markdown('#### Cardio / Sport Sessions')
-            for _, row in cdf.sort_values('activity_date', ascending=False).head(10).iterrows():
-                dt = _to_text(row.get('activity_date', ''), '')
-                atype = _to_text(row.get('activity_type', 'Cardio'), 'Cardio')
+        if history_filter in {'All', 'Cardio', 'Sport'}:
+            if not cardio_df.empty:
+                cdf = cardio_df.copy()
+                activity = cdf.get('activity_type', pd.Series(dtype=str)).astype(str)
+                if history_filter == 'Cardio':
+                    cdf = cdf[~activity.isin(SPORT_ACTIVITY_TYPES)]
+                elif history_filter == 'Sport':
+                    cdf = cdf[activity.isin(SPORT_ACTIVITY_TYPES)]
+                st.markdown('#### Cardio / Sport Sessions')
+                for _, row in cdf.sort_values('activity_date', ascending=False).head(10).iterrows():
+                    dt = _to_text(row.get('activity_date', ''), '')
+                    atype = _to_text(row.get('activity_type', 'Cardio'), 'Cardio')
+                    mins = int(_to_float(row.get('duration_minutes', 0.0), 0.0))
+                    dist = _to_float(row.get('distance_value', 0.0), 0.0)
+                    unit = _to_text(row.get('distance_unit', ''), '')
+                    st.markdown(f"- **{dt}** • {atype} • {mins} min • {dist:.2f} {unit}".strip())
+            else:
+                st.info('Cardio sessions are not available yet.')
+
+        if history_filter in {'All', 'Cardio', 'Sport'} and not apple_df.empty:
+            st.markdown('#### Recent Apple Workouts')
+            show_apple = apple_df.copy()
+            show_apple['activity_type'] = show_apple.get('workout_type', '').astype(str)
+            for _, row in show_apple.sort_values('start_time', ascending=False).head(8).iterrows():
+                started = _to_text(row.get('start_time', ''), '')[:16]
+                atype = _to_text(row.get('activity_type', 'Workout'), 'Workout')
                 mins = int(_to_float(row.get('duration_minutes', 0.0), 0.0))
-                dist = _to_float(row.get('distance_value', 0.0), 0.0)
-                unit = _to_text(row.get('distance_unit', ''), '')
-                st.markdown(f"- **{dt}** • {atype} • {mins} min • {dist:.2f} {unit}".strip())
-        else:
-            st.info('Cardio sessions are not available yet.')
+                st.markdown(f"- **{started}** • {atype} • {mins} min")
 
-    if history_filter in {'All', 'Cardio', 'Sport'} and not apple_df.empty:
-        st.markdown('#### Recent Apple Workouts')
-        show_apple = apple_df.copy()
-        show_apple['activity_type'] = show_apple.get('workout_type', '').astype(str)
-        for _, row in show_apple.sort_values('start_time', ascending=False).head(8).iterrows():
-            started = _to_text(row.get('start_time', ''), '')[:16]
-            atype = _to_text(row.get('activity_type', 'Workout'), 'Workout')
-            mins = int(_to_float(row.get('duration_minutes', 0.0), 0.0))
-            st.markdown(f"- **{started}** • {atype} • {mins} min")
-
-    if not recent_prs.empty:
-        st.markdown('#### PRs')
-        for _, row in recent_prs.head(5).iterrows():
-            st.markdown(f"- {_to_text(row.get('date', ''), '')}: {_to_text(row.get('exercise', ''), '')} • {_to_text(row.get('pr_type', ''), 'PR')}")
+        if not recent_prs.empty:
+            st.markdown('#### PRs')
+            for _, row in recent_prs.head(5).iterrows():
+                st.markdown(f"- {_to_text(row.get('date', ''), '')}: {_to_text(row.get('exercise', ''), '')} • {_to_text(row.get('pr_type', ''), 'PR')}")
+    except Exception:
+        _overlay_logger.exception('history_render_error')
+        st.error('Workout history could not load.')
+        h_retry, h_home = st.columns(2)
+        if h_retry.button('Retry', key='history_retry', width='stretch'):
+            st.rerun()
+        if h_home.button('Return Home', key='history_return_home', width='stretch'):
+            set_active_route('Home')
+            st.rerun()
 
 elif page == "History" and SHOW_DEVELOPER_TOOLS:
     st.markdown(f'<div class="hero"><div class="kicker">{DISPLAY_KICKER}</div><div class="title">Workout History</div><div class="sub">Saved completed sets</div></div>', unsafe_allow_html=True)
