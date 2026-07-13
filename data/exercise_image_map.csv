@@ -1,29 +1,30 @@
-exercise,image_file
-Chest Press Machine,chest_press_machine.png
-Incline Dumbbell Press,incline_dumbbell_press.png
-Pec Deck Fly,pec_deck_fly.png
-Cable Chest Fly,cable_chest_fly.png
-Tricep Pushdown,tricep_pushdown.png
-Overhead Tricep Extension,overhead_tricep_extension.png
-Crunch,crunch.png
-Wide Grip Lat Pulldown,wide_grip_lat_pulldown.png
-Close Grip Pulldown,wide_grip_lat_pulldown.png
-Seated Row Machine,seated_row_machine.png
-Straight Arm Pushdown,straight_arm_pushdown.png
-Rear Delt Machine Fly,rear_delt_machine_fly.png
-Bicep Curl,bicep_curl.png
-Hammer Curl,hammer_curl.png
-Wrist Curl,bicep_curl.png
-Reverse Wrist Curl,hammer_curl.png
-Shoulder Press Machine,shoulder_press_machine.png
-Machine Lateral Raise,machine_lateral_raise.png
-Face Pull,straight_arm_pushdown.png
-Dumbbell Lateral Raise,dumbbell_lateral_raise.png
-Standing Calf Raise,standing_calf_raise.png
-Russian Twist,russian_twist.png
-Leg Curl,leg_curl.png
-Hip Abduction Machine,leg_extension.png
-Hip Adduction Machine,leg_extension.png
-Glute Bridge Machine,leg_press_machine.png
-Image Coming Soon,image_coming_soon.png
-Plank,plank.png
+exercise_name,canonical_exercise_key,primary_image,secondary_image,thumbnail_image,muscle_overlay_image,image_status,review_notes,last_reviewed,approved_by,fallback_type
+Chest Press Machine,chest_press_machine,chest_press_machine.png,,,,needs_review,,,,
+Incline Dumbbell Press,incline_dumbbell_press,incline_dumbbell_press.png,,,,needs_review,,,,
+Pec Deck Fly,pec_deck_fly,pec_deck_fly.png,,,,needs_review,,,,
+Cable Chest Fly,cable_chest_fly,cable_chest_fly.png,,,,needs_review,,,,
+Tricep Pushdown,tricep_pushdown,tricep_pushdown.png,,,,needs_review,,,,
+Overhead Tricep Extension,overhead_tricep_extension,overhead_tricep_extension.png,,,,needs_review,,,,
+Crunch,crunch,crunch.png,,,,needs_review,,,,
+Wide Grip Lat Pulldown,wide_grip_lat_pulldown,wide_grip_lat_pulldown.png,,,,needs_review,,,,
+Close Grip Pulldown,close_grip_pulldown,wide_grip_lat_pulldown.png,,,,needs_review,shared image pending dedicated source,,,
+Seated Row Machine,seated_row_machine,seated_row_machine.png,,,,needs_review,,,,
+Straight Arm Pushdown,straight_arm_pushdown,straight_arm_pushdown.png,,,,needs_review,,,,
+Rear Delt Machine Fly,rear_delt_machine_fly,rear_delt_machine_fly.png,,,,needs_review,,,,
+Bicep Curl,bicep_curl,bicep_curl.png,,,,needs_review,,,,
+Hammer Curl,hammer_curl,hammer_curl.png,,,,needs_review,,,,
+Wrist Curl,wrist_curl,bicep_curl.png,,,,needs_review,shared image pending dedicated source,,,
+Reverse Wrist Curl,reverse_wrist_curl,hammer_curl.png,,,,needs_review,shared image pending dedicated source,,,
+Shoulder Press Machine,shoulder_press_machine,shoulder_press_machine.png,,,,needs_review,,,,
+Machine Lateral Raise,machine_lateral_raise,machine_lateral_raise.png,,,,needs_review,,,,
+Face Pull,face_pull,straight_arm_pushdown.png,,,,needs_review,shared image pending dedicated source,,,
+Dumbbell Lateral Raise,dumbbell_lateral_raise,dumbbell_lateral_raise.png,,,,needs_review,,,,
+Standing Calf Raise,standing_calf_raise,standing_calf_raise.png,,,,needs_review,,,,
+Russian Twist,russian_twist,russian_twist.png,,,,needs_review,low resolution source currently in assets,,,
+Leg Curl,leg_curl,leg_curl.png,,,,needs_review,,,,
+Hip Abduction Machine,hip_abduction_machine,leg_extension.png,,,,needs_review,shared image pending dedicated source,,,
+Hip Adduction Machine,hip_adduction_machine,leg_extension.png,,,,needs_review,shared image pending dedicated source,,,
+Glute Bridge Machine,glute_bridge_machine,leg_press_machine.png,,,,needs_review,shared image pending dedicated source,,,
+Terminal Knee Extensions,terminal_knee_extensions,leg_extension.png,,,,needs_review,shared image pending dedicated source,,,
+Plank,plank,plank.png,,,,needs_review,,,,
+Image Coming Soon,image_coming_soon,image_coming_soon.png,,,,fallback,neutral fallback,,,neutral

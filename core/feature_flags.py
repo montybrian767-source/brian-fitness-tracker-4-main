@@ -7,6 +7,7 @@ import streamlit as st
 
 
 DEFAULT_FLAGS = {
+    'SHOW_DEVELOPER_TOOLS': False,
     'FITNESS_OS_COMMAND_CENTER': True,
     'FITNESS_OS_TRAINING_INTELLIGENCE': False,
     'FITNESS_OS_COACHING_MEMORY': False,

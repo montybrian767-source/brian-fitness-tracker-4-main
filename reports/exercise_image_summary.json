@@ -1,0 +1,58 @@
+{
+  "total_exercises": 29,
+  "approved": 0,
+  "needs_review": 28,
+  "missing": 0,
+  "fallback": 1,
+  "duplicates": 11,
+  "low_resolution": 1,
+  "crop_risk": 28,
+  "duplicate_details": [
+    {
+      "duplicate_group": "sha256:33d89eec481a",
+      "image_path": "assets\\exercises\\bicep_curl.png",
+      "exercises": [
+        "Bicep Curl",
+        "Wrist Curl"
+      ],
+      "classification": "suspicious"
+    },
+    {
+      "duplicate_group": "sha256:803055bbc9bb",
+      "image_path": "assets\\exercises\\wide_grip_lat_pulldown.png",
+      "exercises": [
+        "Close Grip Pulldown",
+        "Wide Grip Lat Pulldown"
+      ],
+      "classification": "suspicious"
+    },
+    {
+      "duplicate_group": "sha256:8f4a60079e34",
+      "image_path": "assets\\exercises\\straight_arm_pushdown.png",
+      "exercises": [
+        "Face Pull",
+        "Straight Arm Pushdown"
+      ],
+      "classification": "suspicious"
+    },
+    {
+      "duplicate_group": "sha256:d66123ff823b",
+      "image_path": "assets\\exercises\\hammer_curl.png",
+      "exercises": [
+        "Hammer Curl",
+        "Reverse Wrist Curl"
+      ],
+      "classification": "suspicious"
+    },
+    {
+      "duplicate_group": "sha256:e66a5a84e1fb",
+      "image_path": "assets\\exercises\\leg_extension.png",
+      "exercises": [
+        "Hip Abduction Machine",
+        "Hip Adduction Machine",
+        "Terminal Knee Extensions"
+      ],
+      "classification": "suspicious"
+    }
+  ]
+}

@@ -5,6 +5,8 @@ from typing import Any, Dict
 import streamlit as st
 import pandas as pd
 
+from config.version import DISPLAY_KICKER
+
 
 def _text(value: Any, default: str = '-') -> str:
     if value is None:
@@ -80,7 +82,7 @@ def render_command_center(daily_command: Dict[str, Any]) -> str:
     st.markdown(
         f"""
         <div class="dc-hero">
-            <div class="dc-kicker">Brian Fit X 12.0 • Premium Production Edition</div>
+            <div class="dc-kicker">{DISPLAY_KICKER}</div>
             <div class="dc-title">Today's Mission</div>
             <div class="dc-sub">Good morning, Brian. Recovery, mission, and execution are aligned for a fast, focused training day.</div>
         </div>

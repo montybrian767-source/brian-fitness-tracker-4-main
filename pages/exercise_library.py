@@ -10,6 +10,7 @@ from engines.exercise_intelligence import ExerciseIntelligence
 from engines.muscle_readiness_engine import build_muscle_readiness_snapshot
 from engines.progressive_overload_engine import analyze_progressive_overload
 from engines.plateau_detection_engine import detect_plateaus
+from utils.exercise_media_utils import ASSETS_DIR, resolve_thumbnail
 
 
 _PAGE_CSS = """
@@ -161,6 +162,10 @@ def render_exercise_library_page(assets_dir: Path, workout_log_df: pd.DataFrame 
     result_cols = st.columns(4)
     for idx, (_, row) in enumerate(filtered.iterrows()):
         with result_cols[idx % 4]:
+            thumb_name = resolve_thumbnail(str(row.get("exercise", "")))
+            thumb_path = ASSETS_DIR / thumb_name
+            if thumb_path.exists():
+                st.image(str(thumb_path), width=170)
             st.markdown(
                 f'<div class="titan-result-chip"><span class="titan-result-count">{idx+1}</span><span>{row["movement_pattern"]}</span></div>',
                 unsafe_allow_html=True,

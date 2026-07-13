@@ -5,6 +5,8 @@ from typing import Dict, List
 
 import pandas as pd
 
+from utils.exercise_media_utils import resolve_exercise_image, resolve_thumbnail
+
 
 class ExerciseIntelligence:
     def __init__(self, db_path=None, intel_path=None, log_path=None):
@@ -255,6 +257,8 @@ class ExerciseIntelligence:
         muscle_group = str(row.get("muscle_group", "")) if row is not None else ""
         equipment = str(row.get("equipment", "Bodyweight")) if row is not None else "Bodyweight"
         image_file = str(row.get("image_file", "")) if row is not None else ""
+        if not image_file:
+            image_file = resolve_exercise_image(exercise_name, view="primary")
         primary = muscle_group.split("+")[0].strip() if muscle_group else "Unknown"
         return {
             "name": exercise_name,
@@ -324,11 +328,16 @@ class ExerciseIntelligence:
         image_files = merged.get("image_files", {})
         if not isinstance(image_files, dict):
             image_files = {}
-        merged["hero_image"] = image_files.get("hero") or merged.get("hero_image") or merged.get("image_file", "")
-        merged["start_image"] = image_files.get("start") or merged.get("start_image") or merged.get("hero_image", "")
-        merged["end_image"] = image_files.get("finish") or merged.get("end_image") or ""
+        resolved_primary = resolve_exercise_image(exercise_name, view="primary")
+        resolved_secondary = resolve_exercise_image(exercise_name, view="secondary")
+        resolved_thumbnail = resolve_thumbnail(exercise_name)
+
+        merged["hero_image"] = image_files.get("hero") or merged.get("hero_image") or merged.get("image_file", "") or resolved_primary
+        merged["start_image"] = image_files.get("start") or merged.get("start_image") or merged.get("hero_image", "") or resolved_primary
+        merged["end_image"] = image_files.get("finish") or merged.get("end_image") or resolved_secondary or ""
         merged["side_image"] = image_files.get("side") or merged.get("side_image") or ""
         merged["top_image"] = image_files.get("top") or merged.get("top_image") or ""
+        merged["thumbnail_image"] = merged.get("thumbnail_image") or resolved_thumbnail
         merged["image_files"] = {
             "hero": merged.get("hero_image", ""),
             "start": merged.get("start_image", ""),

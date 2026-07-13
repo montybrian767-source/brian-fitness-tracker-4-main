@@ -26,6 +26,18 @@ def _ok_badge(value: Any) -> str:
 
 def render_system_center(system_status: Dict[str, Any]) -> None:
     status = system_status if isinstance(system_status, dict) else {}
+    latency_raw = status.get('supabase_latency_ms', None)
+    try:
+        latency_text = f"{float(latency_raw):.0f} ms" if latency_raw is not None else 'N/A'
+    except Exception:
+        latency_text = 'N/A'
+
+    supabase_connected = _text(status.get('supabase_connected', status.get('supabase', 'Unknown')))
+    workouts_ready = _text(status.get('workouts_table_ready', 'Unknown'))
+    cardio_ready = _text(status.get('cardio_table_ready', 'Unknown'))
+    apple_ready = _text(status.get('apple_tables_ready', 'Unknown'))
+    supabase_error = _text(status.get('supabase_error', ''), '')
+
     st.markdown(
         """
         <div class="side-card" style="margin-bottom:10px;">
@@ -57,6 +69,16 @@ def render_system_center(system_status: Dict[str, Any]) -> None:
     d4.metric('Last Cardio Save', _text(status.get('last_cardio_save', '-')))
 
     st.caption(f"Last Apple import: {_text(status.get('last_apple_import', '-'))}")
+
+    st.markdown('### Supabase Health')
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric('Supabase', supabase_connected)
+    s2.metric('Workouts Table', workouts_ready)
+    s3.metric('Cardio Table', cardio_ready)
+    s4.metric('Apple Tables', apple_ready)
+    s5.metric('Latency', latency_text)
+    if supabase_error:
+        st.caption(f"Error: {supabase_error}")
 
     st.markdown('### System Status')
     summary_rows = [

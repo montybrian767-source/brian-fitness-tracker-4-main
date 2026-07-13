@@ -31,6 +31,20 @@ FEATURE_TABLES = {
     'Apple Import Jobs': {'table': 'apple_import_jobs', 'optional': True, 'sql': 'supabase/apple_import_jobs_schema.sql'},
 }
 
+HEALTH_DEFAULTS: Dict[str, Any] = {
+    'ok': False,
+    'message': 'Health check returned an invalid result.',
+    'latency_ms': None,
+    'workouts_ready': False,
+    'cardio_ready': False,
+    'apple_ready': False,
+    'connected': False,
+    'status': 'error',
+    'workout_count': 0,
+    'last_checked': '',
+    'error': '',
+}
+
 
 def _to_int(value: Any, default: int = 0) -> int:
     try:
@@ -349,35 +363,140 @@ def delete_workout(row_id: int) -> Tuple[bool, Optional[str]]:
         return False, str(exc)
 
 
+def normalize_health_check_result(result: Any) -> Dict[str, Any]:
+    if isinstance(result, BaseException):
+        payload = dict(HEALTH_DEFAULTS)
+        payload['message'] = 'Health check failed.'
+        payload['error'] = str(result)
+        payload['last_checked'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return payload
+
+    if isinstance(result, dict):
+        payload = dict(HEALTH_DEFAULTS)
+        payload.update({k: v for k, v in result.items() if k in payload})
+
+        connected = bool(result.get('connected', payload.get('connected', False)))
+        ok = bool(result.get('ok', connected))
+        message = str(result.get('message', '') or result.get('error', '') or payload['message'])
+        latency_ms = result.get('latency_ms', payload['latency_ms'])
+        workouts_ready = bool(result.get('workouts_ready', connected))
+        cardio_ready = bool(result.get('cardio_ready', False))
+        apple_ready = bool(result.get('apple_ready', False))
+
+        payload.update({
+            'ok': ok,
+            'message': message,
+            'latency_ms': latency_ms,
+            'workouts_ready': workouts_ready,
+            'cardio_ready': cardio_ready,
+            'apple_ready': apple_ready,
+            'connected': connected,
+            'status': str(result.get('status', payload.get('status', 'unknown')) or 'unknown'),
+            'workout_count': int(result.get('workout_count', payload.get('workout_count', 0)) or 0),
+            'last_checked': str(result.get('last_checked', payload.get('last_checked', '')) or ''),
+            'error': str(result.get('error', payload.get('error', '')) or ''),
+        })
+        return payload
+
+    if isinstance(result, (tuple, list)):
+        values = list(result) + [None] * 6
+        ok = bool(values[0])
+        message = str(values[1] or '')
+        latency_ms = values[2]
+        workouts_ready = bool(values[3])
+        cardio_ready = bool(values[4])
+        apple_ready = bool(values[5])
+        return {
+            'ok': ok,
+            'message': message,
+            'latency_ms': latency_ms,
+            'workouts_ready': workouts_ready,
+            'cardio_ready': cardio_ready,
+            'apple_ready': apple_ready,
+            'connected': ok,
+            'status': 'healthy' if ok else 'degraded',
+            'workout_count': 0,
+            'last_checked': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error': '' if ok else message,
+        }
+
+    return dict(HEALTH_DEFAULTS)
+
+
+def safe_health_check() -> Dict[str, Any]:
+    try:
+        return normalize_health_check_result(health_check())
+    except Exception as exc:
+        return normalize_health_check_result(exc)
+
+
 def health_check() -> Dict[str, Any]:
     client, err = connect_supabase()
+    started = time.perf_counter()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if err:
-        return {
+        return normalize_health_check_result({
+            'ok': False,
             'connected': False,
             'status': 'disconnected',
             'workout_count': 0,
+            'latency_ms': None,
+            'workouts_ready': False,
+            'cardio_ready': False,
+            'apple_ready': False,
             'last_checked': now,
             'message': 'SUPABASE_URL / SUPABASE_KEY missing or invalid.',
             'error': err,
-        }
+        })
 
     try:
-        response = client.table('workouts').select('*', count='exact', head=True).execute()
-        return {
+        workouts_response = client.table('workouts').select('*', count='exact', head=True).execute()
+        workout_count = int(workouts_response.count or 0)
+
+        workouts_ready = True
+
+        try:
+            client.table('cardio_sessions').select('id', count='exact', head=True).execute()
+            cardio_ready = True
+        except Exception:
+            cardio_ready = False
+
+        try:
+            client.table('apple_activity_daily').select('id', count='exact', head=True).execute()
+            client.table('apple_workouts').select('id', count='exact', head=True).execute()
+            apple_ready = True
+        except Exception:
+            apple_ready = False
+
+        ok = bool(workouts_ready and cardio_ready and apple_ready)
+        status = 'healthy' if ok else 'degraded'
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        message = 'Supabase connected' if ok else 'Supabase connected with missing optional tables.'
+
+        return normalize_health_check_result({
+            'ok': ok,
             'connected': True,
-            'status': 'healthy',
-            'workout_count': int(response.count or 0),
+            'status': status,
+            'workout_count': workout_count,
+            'latency_ms': latency_ms,
+            'workouts_ready': workouts_ready,
+            'cardio_ready': cardio_ready,
+            'apple_ready': apple_ready,
             'last_checked': now,
-            'message': 'Connected',
+            'message': message,
             'error': '',
-        }
+        })
     except Exception as exc:
-        return {
+        return normalize_health_check_result({
+            'ok': False,
             'connected': False,
             'status': 'error',
             'workout_count': 0,
+            'latency_ms': round((time.perf_counter() - started) * 1000.0, 2),
+            'workouts_ready': False,
+            'cardio_ready': False,
+            'apple_ready': False,
             'last_checked': now,
             'message': 'Cloud unavailable',
             'error': str(exc),
-        }
+        })

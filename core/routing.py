@@ -2,13 +2,19 @@ from __future__ import annotations
 
 
 VALID_ROUTES = {
+    # Mobile MVP routes.
+    'home',
+    'workout',
+    'history',
+    'progress',
+    'apple_health',
+    'profile',
+    # Legacy routes kept for backward compatibility / developer mode.
     'ai_personal_coach',
     'command_center',
     'dashboard',
-    'workout',
     'gym_mode',
     'history_center',
-    'progress',
     'apple_activity',
     'recovery_center',
     'recovery_readiness',
@@ -19,14 +25,21 @@ VALID_ROUTES = {
     'body_stats',
     'smart_scale_import',
     'system_center',
+    'exercise_media_manager',
     'training_center',
-    # Backward-compatible route keys still used across app/session state.
-    'history',
 }
 
 ROUTE_ALIASES = {
+    # Mobile MVP aliases.
+    'home': 'home',
+    'workout': 'workout',
+    'history': 'history',
+    'progress': 'progress',
+    'apple health': 'apple_health',
+    'apple_health': 'apple_health',
+    'profile': 'profile',
+    # Legacy aliases.
     'app': 'ai_personal_coach',
-    'home': 'ai_personal_coach',
     'mission': 'ai_personal_coach',
     'coach': 'ai_personal_coach',
     'ai coach': 'ai_personal_coach',
@@ -34,31 +47,39 @@ ROUTE_ALIASES = {
     'ai personal trainer': 'ai_personal_coach',
     'ai_personal_trainer': 'ai_personal_coach',
     'command center': 'command_center',
-    'history': 'history_center',
+    'dashboard': 'dashboard',
     'recovery': 'recovery_center',
     'nutrition': 'nutrition_center',
     'health': 'health_center',
     'performance': 'performance_center',
     'apple intelligence': 'apple_activity',
+    'apple activity': 'apple_activity',
     'todays workout': 'workout',
     "today's workout": 'workout',
     'progress analytics': 'progress',
     'recovery & readiness': 'recovery_readiness',
     'recovery readiness': 'recovery_readiness',
     'system check': 'system_center',
+    'exercise media manager': 'exercise_media_manager',
+    'media manager': 'exercise_media_manager',
     'history_center': 'history_center',
     'smart_scale': 'smart_scale_import',
 }
 
 ROUTE_KEY_TO_PAGE = {
+    # Mobile MVP pages.
+    'home': 'Home',
+    'workout': 'Workout',
+    'history': 'History',
+    'progress': 'Progress',
+    'apple_health': 'Apple Health',
+    'profile': 'Profile',
+    # Legacy pages.
     'ai_personal_coach': 'AI Personal Trainer',
     'command_center': 'Command Center',
     'dashboard': 'Dashboard',
-    'workout': "Today's Workout",
     'gym_mode': 'Gym Mode',
     'history_center': 'History',
-    'history': 'History',
-    'progress': 'Progress Analytics',
     'apple_activity': 'Apple Activity',
     'recovery_center': 'Recovery Center',
     'recovery_readiness': 'Recovery & Readiness',
@@ -69,16 +90,24 @@ ROUTE_KEY_TO_PAGE = {
     'body_stats': 'Body Stats',
     'smart_scale_import': 'Smart Scale',
     'system_center': 'System Center',
+    'exercise_media_manager': 'Exercise Media Manager',
     'training_center': 'Weekly Plan',
 }
 
 PAGE_TO_ROUTE_KEY = {
+    # Mobile MVP pages.
+    'Home': 'home',
+    'Workout': 'workout',
+    'History': 'history',
+    'Progress': 'progress',
+    'Apple Health': 'apple_health',
+    'Profile': 'profile',
+    # Legacy pages.
     'AI Personal Trainer': 'ai_personal_coach',
     'Command Center': 'command_center',
     'Dashboard': 'dashboard',
     "Today's Workout": 'workout',
     'Gym Mode': 'gym_mode',
-    'History': 'history_center',
     'Progress Analytics': 'progress',
     'Apple Activity': 'apple_activity',
     'Recovery Center': 'recovery_center',
@@ -88,12 +117,13 @@ PAGE_TO_ROUTE_KEY = {
     'Body Stats': 'body_stats',
     'Smart Scale': 'smart_scale_import',
     'System Center': 'system_center',
+    'Exercise Media Manager': 'exercise_media_manager',
     'Weekly Plan': 'training_center',
 }
 
 
 def default_home_route() -> str:
-    return 'ai_personal_coach'
+    return 'home'
 
 
 def normalize_route(route: str | None, fallback: str | None = None) -> str:
@@ -123,7 +153,7 @@ def normalize_route(route: str | None, fallback: str | None = None) -> str:
 
 def page_from_route(route: str | None) -> str:
     key = normalize_route(route)
-    return ROUTE_KEY_TO_PAGE.get(key, 'AI Personal Trainer')
+    return ROUTE_KEY_TO_PAGE.get(key, 'Home')
 
 
 def route_from_page(page: str | None) -> str:

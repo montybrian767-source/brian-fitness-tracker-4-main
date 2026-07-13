@@ -4,7 +4,7 @@ from collections.abc import Callable, MutableMapping
 from typing import Any
 
 
-def apply_skip_onboarding_state(state: MutableMapping[str, Any], destination: str = 'ai_personal_coach') -> None:
+def apply_skip_onboarding_state(state: MutableMapping[str, Any], destination: str = 'home') -> None:
     state['onboarding_complete'] = True
     state['onboarding_completed'] = True
     state['onboarding_skipped'] = True
@@ -12,10 +12,10 @@ def apply_skip_onboarding_state(state: MutableMapping[str, Any], destination: st
     state['active_route'] = destination
     state['current_page'] = destination
     state['mobile_route'] = destination
-    state['mobile_nav_override'] = 'Coach'
+    state['mobile_nav_override'] = 'Home'
 
 
-def apply_completed_onboarding_state(state: MutableMapping[str, Any], destination: str = 'ai_personal_coach') -> None:
+def apply_completed_onboarding_state(state: MutableMapping[str, Any], destination: str = 'home') -> None:
     state['onboarding_complete'] = True
     state['onboarding_completed'] = True
     state['onboarding_skipped'] = False
@@ -23,7 +23,7 @@ def apply_completed_onboarding_state(state: MutableMapping[str, Any], destinatio
     state['active_route'] = destination
     state['current_page'] = destination
     state['mobile_route'] = destination
-    state['mobile_nav_override'] = 'Coach'
+    state['mobile_nav_override'] = 'Home'
 
 
 def should_show_onboarding(session_state: MutableMapping[str, Any], persisted_complete: bool, preferences_complete: bool) -> bool:

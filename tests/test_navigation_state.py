@@ -9,7 +9,7 @@ def test_active_route_state_is_defined_and_used():
     assert "def set_active_route(route: str) -> None:" in app_text
     assert "st.session_state['active_route'] = route_key" in app_text
     assert "set_active_route(page)" in app_text
-    assert "current_route = normalize_route(st.session_state.get('active_route'" in app_text
+    assert "active_route = canonical_route_key(st.session_state.get('active_route'))" in app_text
 
 
 def test_normalize_route_none_uses_default():
@@ -25,7 +25,7 @@ def test_normalize_route_app_alias():
 
 
 def test_normalize_route_home_alias():
-    assert normalize_route("home") == "ai_personal_coach"
+    assert normalize_route("home") == "home"
 
 
 def test_normalize_route_ai_personal_coach_alias():
