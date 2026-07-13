@@ -18,10 +18,10 @@ from core.onboarding_state import (
     should_show_onboarding,
 )
 try:
-    from core.routing import default_home_route, normalize_route, page_from_route, route_from_page
+    from core.routing import VALID_ROUTES, default_home_route, normalize_route, page_from_route, route_from_page
 except ImportError:
     # Defensive fallback for rare stale-import states in Streamlit hot-reload.
-    from core.routing import default_home_route, page_from_route, route_from_page
+    from core.routing import VALID_ROUTES, default_home_route, page_from_route, route_from_page
 
     def normalize_route(route: str | None, fallback: str | None = None) -> str:
         key = route_from_page(route)
@@ -1910,6 +1910,7 @@ def get_mobile_primary_page() -> str:
     forced_mobile_target = legacy_override.get(forced_mobile_target, forced_mobile_target)
     if forced_mobile_target in ['Home', 'Workout', 'History', 'Progress', 'More']:
         st.session_state['mobile_primary_nav'] = forced_mobile_target
+        st.session_state.pop('mobile_nav_override', None)
 
     default_page = default_home_route()
     default_route = route_from_page(default_page)
@@ -1939,15 +1940,12 @@ def get_mobile_primary_page() -> str:
         'horizontal': True,
         'key': 'mobile_primary_nav',
         'label_visibility': 'collapsed',
+        'on_change': on_mobile_primary_nav_change,
     }
     if 'mobile_primary_nav' not in st.session_state:
         radio_kwargs['index'] = nav_choices.index(current_mobile) if current_mobile in nav_choices else 0
-    selected = st.radio(**radio_kwargs)
-
-    if forced_mobile_target in nav_choices and selected != forced_mobile_target:
-        selected = forced_mobile_target
-    if 'mobile_nav_override' in st.session_state:
-        st.session_state.pop('mobile_nav_override', None)
+    _ = st.radio(**radio_kwargs)
+    selected = _to_text(st.session_state.get('mobile_primary_nav', current_mobile), current_mobile)
 
     if selected == 'More':
         st.session_state['mobile_more_active'] = True
@@ -1968,7 +1966,10 @@ def get_mobile_primary_page() -> str:
     st.session_state['mobile_more_active'] = False
     target = mapping[selected]
     clear_all_ui_layers()
-    set_active_route(target)
+    if selected == 'Workout':
+        go_to_workout_render_sync()
+    else:
+        set_active_route(target)
     return target
 
 
@@ -1979,6 +1980,42 @@ def set_active_route(route: str) -> None:
     st.session_state['main_nav'] = target
     st.session_state['current_page'] = route_key
     st.session_state['mobile_route'] = route_key
+
+
+def _set_workout_route(sync_mobile_nav: bool) -> None:
+    # Canonical Workout route for all user-facing Workout navigation paths.
+    st.session_state['active_route'] = 'workout'
+    st.session_state['main_nav'] = page_from_route('workout')
+    st.session_state['current_page'] = 'workout'
+    st.session_state['mobile_route'] = 'workout'
+    if sync_mobile_nav:
+        st.session_state['mobile_primary_nav'] = 'Workout'
+    st.session_state['mobile_nav_override'] = 'Workout'
+    st.session_state.pop('force_page_once', None)
+
+
+def go_to_workout() -> None:
+    _set_workout_route(sync_mobile_nav=True)
+
+
+def go_to_workout_render_sync() -> None:
+    _set_workout_route(sync_mobile_nav=False)
+
+
+def on_mobile_primary_nav_change() -> None:
+    selected = _to_text(st.session_state.get('mobile_primary_nav', 'Home'), 'Home')
+    if selected == 'Workout':
+        go_to_workout_render_sync()
+        return
+
+    route_map = {
+        'Home': 'home',
+        'History': 'history',
+        'Progress': 'progress',
+    }
+    target_route = route_map.get(selected)
+    if target_route:
+        set_active_route(target_route)
 
 
 def get_rest_timer_state(flow_key: str) -> dict:
@@ -3542,6 +3579,11 @@ page = page_from_route(active_route)
 forced_page_once = st.session_state.pop('force_page_once', None)
 if isinstance(forced_page_once, str) and forced_page_once.strip():
     page = forced_page_once.strip()
+elif active_route in VALID_ROUTES:
+    resolved_route = canonical_route_key(route_from_page(page))
+    if resolved_route != active_route:
+        # Final guard: if a valid route is selected, force its mapped page instead of silently falling through.
+        page = page_from_route(active_route)
 _ = set_active_route(page)
 _ = log_overlay_diagnostic('route_ready')
 
@@ -3698,9 +3740,12 @@ if page == 'Home':
             unsafe_allow_html=True,
         )
 
-        if st.button('START WORKOUT', key='x12_home_start_workout', width='stretch'):
-            set_active_route('Workout')
-            st.rerun()
+        st.button(
+            'START WORKOUT',
+            key='x12_home_start_workout',
+            width='stretch',
+            on_click=go_to_workout,
+        )
 
         row1, row2 = st.columns(2)
         if row1.button('Preview Workout', key='x12_home_preview_workout', width='stretch'):
